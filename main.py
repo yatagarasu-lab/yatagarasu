@@ -8,12 +8,12 @@ import os
 # Flaskアプリ作成
 app = Flask(__name__)
 
-# 環境変数からAPIキーなど取得
+# 環境変数からキーを取得
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Webhookのエンドポイント設定
+# Webhookエンドポイント
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -28,7 +28,7 @@ def callback():
 
     return 'OK'
 
-# メッセージイベントの処理
+# メッセージ受信時の処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
@@ -52,6 +52,6 @@ def handle_message(event):
     except Exception as e:
         print("エラー発生:", e)
 
-# Renderではこの行は不要（ローカルテスト用）
+# ※Renderでは app.run() 不要
 # if __name__ == "__main__":
 #     app.run()
