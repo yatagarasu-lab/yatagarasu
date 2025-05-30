@@ -1,19 +1,21 @@
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.v3.messaging import LineBotApi
+from linebot.v3.webhook import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging.models import TextMessage, TextSendMessage
+from linebot.v3.webhook.models import MessageEvent
 import openai
 import os
 
 # Flaskアプリ作成
 app = Flask(__name__)
 
-# 環境変数から各種キー取得
+# 環境変数から各APIキーを取得
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Webhookエンドポイント設定
+# Webhookエンドポイント
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -43,7 +45,7 @@ def handle_message(event):
             ]
         )
         reply_text = response["choices"][0]["message"]["content"]
-        print("GPTの返答:", reply_text)
+        print("GPTの回答:", reply_text)
 
         # LINEへ返信
         reply = TextSendMessage(text=reply_text)
@@ -52,7 +54,7 @@ def handle_message(event):
     except Exception as e:
         print("エラー発生:", e)
 
-# RenderでFlaskをポートバインドして起動
-if __name__ == '__main__':
+# Render用ポートバインド（PORT環境変数を利用）
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
