@@ -3,11 +3,17 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
+import openai
 
+# Flaskアプリ作成
 app = Flask(__name__)
+
+# 環境変数から各種キーを取得
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# LINEのWebhookエンドポイント
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -20,17 +26,14 @@ def callback():
 
     return 'OK'
 
-import openai  # ← ファイルの一番上の import 部分に追加してOK
-
+# ユーザーからのメッセージを処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_message = event.message.text  # ユーザーが送った内容
+    user_message = event.message.text
 
-    openai.api_key = os.getenv("OPENAI_API_KEY")  # OpenAIのAPIキーを環境変数から取得
-
-    # ChatGPTに問い合わせ
+    # ChatGPTへ問い合わせ
     response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",  # GPTの種類（Plusならgpt-4でもOK）
+        model="gpt-3.5-turbo",
         messages=[
             {"role": "user", "content": user_message}
         ]
@@ -38,7 +41,12 @@ def handle_message(event):
 
     # GPTの返答を取り出す
     reply_text = response["choices"][0]["message"]["content"]
+    print("GPTの返答:", reply_text)  # ←デバッグ用
 
-    # LINEに返答を送る
+    # LINEへ返信
     reply = TextSendMessage(text=reply_text)
     line_bot_api.reply_message(event.reply_token, reply)
+
+# アプリ起動（Renderでは必要なし）
+# if __name__ == "__main__":
+#     app.run()
