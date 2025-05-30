@@ -1,39 +1,40 @@
-import os
 from flask import Flask, request, abort
-
-from linebot.v3.webhook import WebhookHandler
-from linebot.v3.messaging import MessagingApi, Configuration
-from linebot.v3.models import MessageEvent, TextMessage, TextMessageContent
-from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging import MessagingApi, Configuration, ApiClient, ReplyMessageRequest, TextMessage
+from linebot.v3.webhook import WebhookHandler, WebhookParser
+import os
+import json
 
 app = Flask(__name__)
 
-# 環境変数からトークンとシークレットを取得
 channel_secret = os.getenv("LINE_CHANNEL_SECRET")
 channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 configuration = Configuration(access_token=channel_access_token)
 handler = WebhookHandler(channel_secret)
-line_bot_api = MessagingApi(configuration)
+parser = WebhookParser(channel_secret)
+
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
+
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
+        events = parser.parse(body, signature)
+    except Exception as e:
+        print("Webhook parsing error:", e)
         abort(400)
-    return "OK"
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    line_bot_api.reply_message(
-        event.reply_token,
-        [
-            TextMessage(text="こんにちは！テスト応答です✨")
-        ]
-    )
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        for event in events:
+            if event.message and isinstance(event.message, TextMessage):
+                reply_token = event.reply_token
+                text = event.message.text
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[TextMessage(text=f"あなたのメッセージ: {text}")]
+                    )
+                )
+    return 'OK'
