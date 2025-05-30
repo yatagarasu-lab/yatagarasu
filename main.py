@@ -1,40 +1,46 @@
-from flask import Flask, request, abort
-from linebot.v3.messaging import MessagingApi, Configuration, ApiClient, ReplyMessageRequest, TextMessage
-from linebot.v3.webhook import WebhookHandler, WebhookParser
 import os
-import json
+from flask import Flask, request, abort
+from linebot.v3 import WebhookHandler
+from linebot.v3.messaging import MessagingApiClient, ReplyMessageRequest
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from dotenv import load_dotenv
+
+# 環境変数読み込み
+load_dotenv()
 
 app = Flask(__name__)
 
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-configuration = Configuration(access_token=channel_access_token)
-handler = WebhookHandler(channel_secret)
-parser = WebhookParser(channel_secret)
-
+# チャネルシークレットとアクセストークン
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+client = MessagingApiClient(channel_access_token=os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
-        events = parser.parse(body, signature)
+        handler.handle(body, signature)
     except Exception as e:
-        print("Webhook parsing error:", e)
+        print("Error:", e)
         abort(400)
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        for event in events:
-            if event.message and isinstance(event.message, TextMessage):
-                reply_token = event.reply_token
-                text = event.message.text
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=reply_token,
-                        messages=[TextMessage(text=f"あなたのメッセージ: {text}")]
-                    )
-                )
-    return 'OK'
+    return "OK"
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    message = event.message.text
+    reply = f"あなたのメッセージ: {message}"
+    client.reply_message(
+        ReplyMessageRequest(
+            reply_token=event.reply_token,
+            messages=[{
+                "type": "text",
+                "text": reply
+            }]
+        )
+    )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
