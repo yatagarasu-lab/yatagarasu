@@ -1,20 +1,19 @@
 from flask import Flask, request, abort
-from linebot.v3.messaging import LineBotApi
-from linebot.v3.webhook import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging.models import MessageEvent, TextMessage, TextSendMessage
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import openai
 import os
 
 # Flaskアプリ作成
 app = Flask(__name__)
 
-# 環境変数からAPIキーなどを取得
+# 環境変数から各種キー取得
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Webhookエンドポイント
+# Webhookエンドポイント設定
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -53,7 +52,7 @@ def handle_message(event):
     except Exception as e:
         print("エラー発生:", e)
 
-# RenderではFlaskをポートバインドして起動
+# RenderでFlaskをポートバインドして起動
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
