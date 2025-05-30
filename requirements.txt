@@ -1,2 +1,2 @@
-flask
-line-bot-sdk==3.5.1
+git+https://github.com/line/line-bot-sdk-python.git@master
+Flask==3.1.1
