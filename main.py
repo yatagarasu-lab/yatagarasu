@@ -1,39 +1,30 @@
 from flask import Flask, request, abort
-from linebot.v3.messaging import MessagingApiClient, ReplyMessageRequest, TextMessage
 from linebot.v3.webhook import WebhookHandler
-from linebot.v3.webhooks import MessageEvent
+from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage
+from linebot.v3.exceptions import InvalidSignatureError
 import os
 
 app = Flask(__name__)
-
-# 環境変数からトークンとシークレットを取得
-line_bot_api = MessagingApiClient(channel_access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+line_bot_api = MessagingApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature')
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
-    except Exception as e:
+    except InvalidSignatureError:
         abort(400)
 
     return 'OK'
 
-# メッセージイベントを処理
-@handler.add(MessageEvent)
+@handler.add(event=MessageEvent, message=TextMessage)
 def handle_message(event):
-    if isinstance(event.message, TextMessage):
-        message = TextMessage(text="こんにちは！")
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[message]
-            )
+    line_bot_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=event.reply_token,
+            messages=[TextMessage(text=event.message.text)]
         )
-
-# Flaskアプリを gunicorn が認識できるように定義
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    )
