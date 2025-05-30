@@ -41,12 +41,12 @@ def handle_message(event):
 
     # GPTの返答を取り出す
     reply_text = response["choices"][0]["message"]["content"]
-    print("GPTの返答:", reply_text)  # ←デバッグ用
+    print("GPTの返答:", reply_text)  # デバッグ用
 
     # LINEへ返信
     reply = TextSendMessage(text=reply_text)
     line_bot_api.reply_message(event.reply_token, reply)
 
-# アプリ起動（Renderでは必要なし）
+# ※Render上では app.run() は不要（コメントアウト）
 # if __name__ == "__main__":
 #     app.run()
