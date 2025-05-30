@@ -20,7 +20,25 @@ def callback():
 
     return 'OK'
 
+import openai  # ← ファイルの一番上の import 部分に追加してOK
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    reply = TextSendMessage(text="ありがとうございます")
+    user_message = event.message.text  # ユーザーが送った内容
+
+    openai.api_key = os.getenv("OPENAI_API_KEY")  # OpenAIのAPIキーを環境変数から取得
+
+    # ChatGPTに問い合わせ
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",  # GPTの種類（Plusならgpt-4でもOK）
+        messages=[
+            {"role": "user", "content": user_message}
+        ]
+    )
+
+    # GPTの返答を取り出す
+    reply_text = response["choices"][0]["message"]["content"]
+
+    # LINEに返答を送る
+    reply = TextSendMessage(text=reply_text)
     line_bot_api.reply_message(event.reply_token, reply)
