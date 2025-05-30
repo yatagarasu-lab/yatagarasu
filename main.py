@@ -1,18 +1,37 @@
-from flask import Flask, request, abort
-from linebot.v3.webhook import WebhookHandler
-from linebot.v3.messaging import MessagingApi, ReplyMessageRequest, TextMessage
-from linebot.v3.exceptions import InvalidSignatureError
 import os
+import sys
+from argparse import ArgumentParser
+
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
-handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
-line_bot_api = MessagingApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
+
+# 環境変数からチャンネルシークレットとアクセストークンを取得
+channel_secret = os.getenv('LINE_CHANNEL_SECRET', None)
+channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', None)
+if channel_secret is None:
+    print('Specify LINE_CHANNEL_SECRET as environment variable.')
+    sys.exit(1)
+if channel_access_token is None:
+    print('Specify LINE_CHANNEL_ACCESS_TOKEN as environment variable.')
+    sys.exit(1)
+
+line_bot_api = LineBotApi(channel_access_token)
+handler = WebhookHandler(channel_secret)
 
 @app.route("/callback", methods=['POST'])
 def callback():
+    # リクエストヘッダーから署名を取得
     signature = request.headers['X-Line-Signature']
-    body = request.get_data(as_text=True)
 
+    # リクエストボディを取得
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
+
+    # ハンドラで署名検証とイベント処理
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -20,11 +39,20 @@ def callback():
 
     return 'OK'
 
-@handler.add(event=MessageEvent, message=TextMessage)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    # 受信したメッセージをそのまま返す
     line_bot_api.reply_message(
-        ReplyMessageRequest(
-            reply_token=event.reply_token,
-            messages=[TextMessage(text=event.message.text)]
-        )
+        event.reply_token,
+        TextSendMessage(text=event.message.text)
     )
+
+if __name__ == "__main__":
+    arg_parser = ArgumentParser(
+        usage='Usage: python ' + __file__ + ' [--port <port>] [--help]'
+    )
+    arg_parser.add_argument('-p', '--port', default=8000, help='port')
+    arg_parser.add_argument('-d', '--debug', default=False, help='debug')
+    options = arg_parser.parse_args()
+
+    app.run(debug=options.debug, port=options.port)
