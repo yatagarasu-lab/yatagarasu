@@ -1,36 +1,51 @@
-from flask import Flask, request
-from linebot.v4.messaging import MessagingApiClient, ReplyMessageRequest
-from linebot.v4.webhook import WebhookHandler
-from linebot.v4.models import TextMessage, TextMessageContent, MessageEvent
 import os
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+import openai
 
 app = Flask(__name__)
 
-# 環境変数から取得（Renderの環境変数設定に登録しておくこと）
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# 環境変数（Renderに設定）
+line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
+openai.api_key = os.environ.get("OPENAI_API_KEY")
 
-handler = WebhookHandler(channel_secret)
-client = MessagingApiClient(channel_access_token)
+@app.route("/")
+def hello():
+    return "Hello, this is a LINE bot using ChatGPT!"
 
-@app.route("/callback", methods=['POST'])
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-    handler.handle(body, signature)
-    return 'OK'
 
-@handler.on(MessageEvent)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return "OK"
+
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    if isinstance(event.message, TextMessageContent):
-        reply = TextMessage(text=f"あなたのメッセージ: {event.message.text}")
-        client.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[reply]
-            )
-        )
+    user_message = event.message.text
+
+    # ChatGPTへの問い合わせ
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "user", "content": user_message}
+        ]
+    )
+    reply_text = response["choices"][0]["message"]["content"].strip()
+
+    # LINEに返信
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run()
