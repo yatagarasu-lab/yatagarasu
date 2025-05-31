@@ -4,15 +4,15 @@ import os
 
 app = Flask(__name__)
 
-# OpenAIクライアントの初期化（最新版対応）
+# OpenAI クライアントの初期化（v1.22対応）
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    # ユーザーからのメッセージ（ここでは仮のメッセージ）
+    # ユーザーメッセージを仮置き（実装時はLINEメッセージを取得）
     user_message = "こんにちは！"
 
-    # OpenAIから応答を取得
+    # OpenAI へのリクエスト（v1形式）
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
@@ -21,9 +21,9 @@ def callback():
         ]
     )
 
-    # 応答メッセージを取得
+    # 応答文を取り出す
     reply_text = response.choices[0].message.content
-    print(reply_text)  # 確認用ログ出力
+    print(reply_text)  # デバッグ出力
 
     return "ありがとうございます"
 
