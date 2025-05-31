@@ -4,17 +4,13 @@ import os
 
 app = Flask(__name__)
 
-# OpenAI クライアントの初期化（proxies は削除）
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+# proxies を使わずに初期化
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    # 仮のユーザー入力（ここはLINEから受け取るように後で修正）
     user_message = "こんにちは！"
 
-    # ChatGPT にメッセージ送信
     response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
@@ -24,7 +20,7 @@ def callback():
     )
 
     reply_text = response.choices[0].message.content
-    print(reply_text)  # コンソールに出力（動作確認用）
+    print(reply_text)
 
     return "ありがとうございます"
 
