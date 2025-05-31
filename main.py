@@ -1,99 +1,49 @@
-import os
-import sys
-import time
-import io
-import threading
-from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
-from dotenv import load_dotenv
-import base64
+import os
 
-# 環境変数をロード
-load_dotenv()
-
-# Flaskアプリの初期化
 app = Flask(__name__)
 
-# LINE API初期化
-channel_secret = os.getenv('LINE_CHANNEL_SECRET')
-channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-if not channel_secret or not channel_access_token:
-    print("Specify LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN")
-    sys.exit(1)
+# 環境変数の取得
+line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
+handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+openai_api_key = os.environ["OPENAI_API_KEY"]
 
-line_bot_api = LineBotApi(channel_access_token)
-handler = WebhookHandler(channel_secret)
+client = OpenAI(api_key=openai_api_key)  # ← proxiesは不要！
 
-# OpenAI 初期化
-openai_api_key = os.getenv('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_api_key)
-
-# 最後のメッセージ時間
-last_received_time = datetime.utcnow()
-
-# 遅延返信
-def delayed_reply(user_id):
-    global last_received_time
-    while True:
-        now = datetime.utcnow()
-        if (now - last_received_time) >= timedelta(minutes=5):
-            line_bot_api.push_message(user_id, TextMessage(text="ありがとうございます"))
-            break
-        time.sleep(30)
-
-@app.route("/callback", methods=['POST'])
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-    return 'OK'
+
+    return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    global last_received_time
-    last_received_time = datetime.utcnow()
+def handle_message(event):
+    user_message = event.message.text
 
-    user_text = event.message.text
-    client.chat.completions.create(
-        model="gpt-4",
+    # GPTの応答生成
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",  # or "gpt-4"
         messages=[
-            {"role": "system", "content": "あなたはLINEで受け取ったメッセージを分析するAIです。内容を要約し、予測は求められたときのみ返答します。"},
-            {"role": "user", "content": user_text}
+            {"role": "system", "content": "あなたは親切なアシスタントです。"},
+            {"role": "user", "content": user_message},
         ]
     )
 
-    threading.Thread(target=delayed_reply, args=(event.source.user_id,)).start()
-
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    global last_received_time
-    last_received_time = datetime.utcnow()
-
-    message_id = event.message.id
-    content = line_bot_api.get_message_content(message_id)
-    image_data = base64.b64encode(content.content).decode("utf-8")
-
-    client.chat.completions.create(
-        model="gpt-4-vision-preview",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "この画像の内容を要約してください"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-                ]
-            }
-        ]
+    reply_text = response.choices[0].message.content.strip()
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
     )
-
-    threading.Thread(target=delayed_reply, args=(event.source.user_id,)).start()
 
 if __name__ == "__main__":
     app.run()
