@@ -1,29 +1,51 @@
-from flask import Flask, request
-import openai
 import os
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask
 
 app = Flask(__name__)
 
-# OpenAI クライアント初期化（v1）
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    user_message = "こんにちは！"
+def get_miniloto_prediction():
+    return [
+        [5, 12, 18, 23, 29],
+        [1, 11, 16, 20, 27],
+        [3, 8, 13, 19, 25],
+        [2, 9, 14, 21, 30],
+        [4, 7, 17, 22, 28],
+    ]
 
-    # 応答を生成
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "あなたは親切なアシスタントです。"},
-            {"role": "user", "content": user_message}
-        ]
-    )
+def format_prediction(pred_list):
+    message = "🎯【今週のミニロト予想】\n"
+    for i, line in enumerate(pred_list, start=1):
+        nums = " ".join(f"{n:02d}" for n in sorted(line))
+        message += f"{i}. {nums}\n"
+    return message
 
-    reply_text = response.choices[0].message.content
-    print(reply_text)
+def send_line_message(message):
+    url = 'https://api.line.me/v2/bot/message/broadcast'
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'
+    }
+    payload = {
+        "messages": [{"type": "text", "text": message}]
+    }
+    requests.post(url, headers=headers, json=payload)
 
-    return "ありがとうございます"
+def send_miniloto_prediction():
+    prediction = get_miniloto_prediction()
+    message = format_prediction(prediction)
+    send_line_message(message)
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='sun', hour=8, minute=0)
+scheduler.start()
+
+@app.route("/")
+def home():
+    return "LINE Notification Bot is running"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run()
