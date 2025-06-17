@@ -1,12 +1,15 @@
 import os
 import requests
+from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask
 
 app = Flask(__name__)
 
+# 環境変数からトークン取得
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# ミニロト予想を返す関数（固定値、後でAI連携も可）
 def get_miniloto_prediction():
     return [
         [5, 12, 18, 23, 29],
@@ -16,36 +19,43 @@ def get_miniloto_prediction():
         [4, 7, 17, 22, 28],
     ]
 
+# メッセージ整形
 def format_prediction(pred_list):
     message = "🎯【今週のミニロト予想】\n"
     for i, line in enumerate(pred_list, start=1):
-        nums = " ".join(f"{n:02d}" for n in sorted(line))
+        nums = " ".join(f"{n:02d}" for n in line)
         message += f"{i}. {nums}\n"
     return message
 
+# LINEに通知送信
 def send_line_message(message):
     url = 'https://api.line.me/v2/bot/message/broadcast'
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'
+        'Authorization': f'Bearer {LINE_ACCESS_TOKEN}',
     }
     payload = {
         "messages": [{"type": "text", "text": message}]
     }
     requests.post(url, headers=headers, json=payload)
 
+# 定期実行：ミニロト通知
 def send_miniloto_prediction():
-    prediction = get_miniloto_prediction()
-    message = format_prediction(prediction)
-    send_line_message(message)
+    pred = get_miniloto_prediction()
+    msg = format_prediction(pred)
+    send_line_message(msg)
 
+# ✅ LINE Webhook エンドポイント
+@app.route("/callback", methods=["POST"])
+def callback():
+    print("LINEからPOST受信しました")
+    return "OK", 200
+
+# スケジューラー起動
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='sun', hour=8, minute=0)
+scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='mon', hour=8, minute=0)
 scheduler.start()
 
-@app.route("/")
-def home():
-    return "LINE Notification Bot is running"
-
+# サーバー起動
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
