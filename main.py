@@ -3,91 +3,74 @@ import requests
 from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-
-# Flaskアプリ作成
 app = Flask(__name__)
 
-# 環境変数からトークンなどを取得
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+# 環境変数からトークン取得
+LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# LINE API 初期化
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# ✅ Webhookエンドポイント
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
-
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        print("Webhook Error:", e)
-        return "Error", 400
-
-    print("LINEからPOST受信しました")
-    return "OK", 200
-
-# ✅ ユーザーからのメッセージイベント処理
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_text = event.message.text
-
-    # 固定返信（変更可能）
-    reply = "ありがとうございます"
-
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
-    )
-
-# ✅ ミニロト予想ロジック（仮・固定）
+# ミニロト予想（仮固定。AI連携も可）
 def get_miniloto_prediction():
     return [
-        [5, 12, 18, 23, 29],
-        [1, 11, 16, 20, 27],
-        [3, 8, 13, 19, 25],
-        [2, 9, 14, 21, 30],
+        [1, 5, 11, 18, 26],
+        [3, 9, 14, 20, 29],
+        [2, 8, 13, 21, 30],
         [4, 7, 17, 22, 28],
+        [6, 10, 15, 23, 27],
     ]
 
-# ✅ メッセージ整形
-def format_prediction(pred_list):
+# スロット予想（サンプル固定）
+def get_slot_recommendation():
+    return [
+        "📍ガイア川崎 → 北斗の拳（並び）1101〜1103",
+        "📍楽園川崎 → 番長4 単品で投入傾向あり",
+        "📍123横浜西口 → マギレコ or グールに注意"
+    ]
+
+# LINE用に整形
+def format_message(miniloto, slot):
     message = "🎯【今週のミニロト予想】\n"
-    for i, line in enumerate(pred_list, start=1):
+    for i, line in enumerate(miniloto, 1):
         nums = " ".join(f"{n:02d}" for n in line)
         message += f"{i}. {nums}\n"
+
+    message += "\n🎰【今日のスロットおすすめ】\n"
+    for line in slot:
+        message += f"{line}\n"
     return message
 
-# ✅ LINE一斉送信
+# LINEに通知
 def send_line_message(message):
     url = 'https://api.line.me/v2/bot/message/broadcast'
     headers = {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {LINE_CHANNEL_ACCESS_TOKEN}',
+        'Authorization': f'Bearer {LINE_ACCESS_TOKEN}',
     }
     payload = {
         "messages": [{"type": "text", "text": message}]
     }
     response = requests.post(url, headers=headers, json=payload)
-    print("送信結果:", response.status_code, response.text)
+    print("LINE送信ステータス:", response.status_code)
+    print("レスポンス:", response.text)
 
-# ✅ 毎週月曜 朝8時に自動通知
-def send_miniloto_prediction():
-    pred = get_miniloto_prediction()
-    msg = format_prediction(pred)
+# 通知関数（定期 or 手動）
+def send_combined_notification():
+    miniloto = get_miniloto_prediction()
+    slot = get_slot_recommendation()
+    msg = format_message(miniloto, slot)
     send_line_message(msg)
 
-# スケジューラー起動
+# Webhook（未使用でもOK）
+@app.route("/callback", methods=["POST"])
+def callback():
+    print("LINE Webhook受信")
+    return "OK", 200
+
+# スケジューラー起動（月曜朝8時）
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='mon', hour=8, minute=0)
+scheduler.add_job(send_combined_notification, 'cron', day_of_week='mon', hour=8, minute=0)
 scheduler.start()
 
-# ✅ アプリ起動（Render用）
+# Flask起動
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
