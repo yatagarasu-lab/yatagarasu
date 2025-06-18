@@ -10,6 +10,66 @@ app = Flask(__name__)
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# ✅ /callback 定義（メッセージ受信→返信あり）
+@app.route("/callback", methods=["POST"])
+def callback():
+    body = request.get_json()
+    print("LINEからPOST受信:", json.dumps(body, ensure_ascii=False))
+
+    try:
+        events = body.get("events", [])
+        for event in events:
+            if event.get("type") == "message" and event["message"]["type"] == "text":
+                reply_token = event["replyToken"]
+                reply_text = "ありがとうございます"
+
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+                }
+
+                payload = {
+                    "replyToken": reply_token,
+                    "messages": [{
+                        "type": "text",
+                        "text": reply_text
+                    }]
+                }
+
+                res = requests.post("https://api.line.me/v2/bot/message/reply",
+                                    headers=headers, json=payload)
+                print("返信結果:", res.status_code, res.text)
+
+    except Exception as e:
+        print("エラー:", e)
+
+    return "OK", 200
+
+
+# 🎯 ミニロト通知（毎週月曜8:00）
+def get_miniloto_prediction():
+    return [
+        [5, 
+
+以下が**LINE返信 + ミニロト自動通知**の両方に対応した、完成版 `main.py` です。
+
+---
+
+## ✅ 完全版 `main.py`
+
+```python
+import os
+import json
+import requests
+from flask import Flask, request
+from apscheduler.schedulers.background import BackgroundScheduler
+
+app = Flask(__name__)
+
+# 環境変数
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 # 🎯 ミニロト予想関数（仮）
 def get_miniloto_prediction():
     return [
