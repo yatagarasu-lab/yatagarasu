@@ -1,15 +1,45 @@
 import os
+import json
 import requests
 from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
-# 環境変数からトークンを取得
+# 環境変数取得
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ミニロト予想（仮で固定値）
+line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# ✅ LINE Webhookエンドポイント
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+        print("LINEからPOST受信しました")
+    except Exception as e:
+        print(f"エラー: {e}")
+        return "Error", 400
+
+    return "OK", 200
+
+# ✅ メッセージイベントの返信
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="ありがとうございます")
+    )
+
+# ✅ ミニロト予想（仮データ）
 def get_miniloto_prediction():
     return [
         [5, 12, 18, 23, 29],
@@ -19,15 +49,13 @@ def get_miniloto_prediction():
         [4, 7, 17, 22, 28],
     ]
 
-# メッセージ整形
+# ✅ 整形してLINEへ送信
 def format_prediction(pred_list):
     message = "🎯【今週のミニロト予想】\n"
-    for i, line in enumerate(pred_list, start=1):
-        nums = " ".join(f"{n:02d}" for n in line)
-        message += f"{i}. {nums}\n"
+    for i, line in enumerate(pred_list, 1):
+        message += f"{i}. {' '.join(f'{n:02d}' for n in line)}\n"
     return message
 
-# LINEにメッセージを送る
 def send_line_message(message):
     url = 'https://api.line.me/v2/bot/message/broadcast'
     headers = {
@@ -39,23 +67,17 @@ def send_line_message(message):
     }
     requests.post(url, headers=headers, json=payload)
 
-# 毎週月曜朝8時に送信
+# ✅ 月曜8時に送信
 def send_miniloto_prediction():
     pred = get_miniloto_prediction()
     msg = format_prediction(pred)
     send_line_message(msg)
 
-# Webhook エンドポイント
-@app.route("/callback", methods=["POST"])
-def callback():
-    print("LINEからPOST受信しました")
-    return "OK", 200
-
-# スケジューラー
+# ✅ スケジューラー
 scheduler = BackgroundScheduler()
 scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='mon', hour=8, minute=0)
 scheduler.start()
 
-# アプリ起動
+# ✅ サーバー起動
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
