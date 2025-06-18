@@ -6,12 +6,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
-# 環境変数からトークン取得
+# 環境変数
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ======== ミニロト予想と通知関数 ========
-
+# 🎯 ミニロト予想関数（仮）
 def get_miniloto_prediction():
     return [
         [5, 12, 18, 23, 29],
@@ -21,6 +20,7 @@ def get_miniloto_prediction():
         [4, 7, 17, 22, 28],
     ]
 
+# 整形関数
 def format_prediction(pred_list):
     message = "🎯【今週のミニロト予想】\n"
     for i, line in enumerate(pred_list, start=1):
@@ -28,6 +28,7 @@ def format_prediction(pred_list):
         message += f"{i}. {nums}\n"
     return message
 
+# LINE一斉送信
 def send_line_message(message):
     url = 'https://api.line.me/v2/bot/message/broadcast'
     headers = {
@@ -37,55 +38,55 @@ def send_line_message(message):
     payload = {
         "messages": [{"type": "text", "text": message}]
     }
-    requests.post(url, headers=headers, json=payload)
+    res = requests.post(url, headers=headers, json=payload)
+    print("LINE送信結果:", res.status_code, res.text)
 
+# 定期実行ジョブ（月曜8:00）
 def send_miniloto_prediction():
     pred = get_miniloto_prediction()
     msg = format_prediction(pred)
     send_line_message(msg)
 
-# ======== Webhook応答機能 ========
-
+# ✅ Webhookエンドポイント（応答用）
 @app.route("/callback", methods=["POST"])
 def callback():
     body = request.get_json()
-    print("LINEからPOST受信:", body)
+    print("LINEから受信:", json.dumps(body, ensure_ascii=False))
 
     try:
-        events = body["events"]
+        events = body.get("events", [])
         for event in events:
-            if event["type"] == "message" and event["message"]["type"] == "text":
+            if event.get("type") == "message" and event["message"]["type"] == "text":
                 reply_token = event["replyToken"]
-                user_message = event["message"]["text"]
-
-                reply_message = {
-                    "replyToken": reply_token,
-                    "messages": [{
-                        "type": "text",
-                        "text": "ありがとうございます"
-                    }]
-                }
+                reply_text = "ありがとうございます"
 
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
                 }
 
-                requests.post("https://api.line.me/v2/bot/message/reply",
-                              headers=headers, json=reply_message)
+                payload = {
+                    "replyToken": reply_token,
+                    "messages": [{
+                        "type": "text",
+                        "text": reply_text
+                    }]
+                }
+
+                res = requests.post("https://api.line.me/v2/bot/message/reply",
+                                    headers=headers, json=payload)
+                print("返信結果:", res.status_code, res.text)
 
     except Exception as e:
         print("エラー:", e)
 
     return "OK", 200
 
-# ======== スケジューラー（毎週月曜8:00に通知） ========
-
+# スケジューラー開始
 scheduler = BackgroundScheduler()
 scheduler.add_job(send_miniloto_prediction, 'cron', day_of_week='mon', hour=8, minute=0)
 scheduler.start()
 
-# ======== Flaskサーバー起動 ========
-
+# サーバー起動
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
