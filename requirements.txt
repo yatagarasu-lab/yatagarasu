@@ -1,5 +1,5 @@
-flask
-dropbox
-openai
-requests
+Flask
+line-bot-sdk==3.5.0
 python-dotenv
+openai
+dropbox
