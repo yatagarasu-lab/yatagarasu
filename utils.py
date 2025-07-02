@@ -1,46 +1,22 @@
-import os
 import dropbox
-from dropbox.exceptions import AuthError
-from dotenv import load_dotenv
+import os
+import openai
 
-load_dotenv()
+DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+def save_and_process_file(file_path, content):
+    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 
-def get_dropbox_client():
-    try:
-        dbx = dropbox.Dropbox(
-            app_key=DROPBOX_APP_KEY,
-            app_secret=DROPBOX_APP_SECRET,
-            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
-        )
-        return dbx
-    except AuthError as e:
-        print("Dropbox認証エラー:", e)
-        return None
+    # ファイル保存
+    dbx.files_upload(content.encode(), file_path, mode=dropbox.files.WriteMode.overwrite)
 
-def list_files_in_folder(folder_path="/スロットデータ"):
-    dbx = get_dropbox_client()
-    if not dbx:
-        return []
+    # 内容の要約（OpenAIに送信）
+    summary = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "次のファイルの内容を要約してください。"},
+            {"role": "user", "content": content}
+        ]
+    )
 
-    try:
-        result = dbx.files_list_folder(folder_path)
-        return [entry.name for entry in result.entries if isinstance(entry, dropbox.files.FileMetadata)]
-    except Exception as e:
-        print(f"Dropboxフォルダ取得失敗: {e}")
-        return []
-
-def download_file(file_path):
-    dbx = get_dropbox_client()
-    if not dbx:
-        return None
-
-    try:
-        metadata, res = dbx.files_download(file_path)
-        return res.content
-    except Exception as e:
-        print(f"Dropboxファイルダウンロード失敗: {e}")
-        return None
+    return summary['choices'][0]['message']['content']
