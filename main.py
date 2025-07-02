@@ -1,25 +1,19 @@
-import os
 from flask import Flask, request, abort
-from dotenv import load_dotenv
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import utils  # 先ほど作ったやつ
+import os
 import openai
-
-load_dotenv()
+from utils.dropbox_handler import save_and_process_file
 
 app = Flask(__name__)
 
-# LINE
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
-
-# OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-@app.route("/webhook", methods=['POST'])
-def webhook():
+@app.route("/callback", methods=['POST'])
+def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
@@ -31,33 +25,16 @@ def webhook():
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text.strip()
+def handle_text_message(event):
+    user_message = event.message.text
 
-    if user_message == "スロットデータ":
-        files = utils.list_files_in_folder()
-        if not files:
-            reply = "Dropboxにファイルが見つかりませんでした。"
-        else:
-            latest_file = sorted(files)[-1]
-            content = utils.download_file(f"/スロットデータ/{latest_file}")
-
-            if content:
-                prompt = f"以下のデータを解析し、スロットの設定や傾向を要約してください。\n\n{content.decode('utf-8')}"
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                reply = response.choices[0].message.content.strip()
-            else:
-                reply = "ファイルのダウンロードに失敗しました。"
+    # Dropboxなどの自動処理が行われた後の返信例
+    if "ありがとう" in user_message or "ありがと" in user_message:
+        reply = "どういたしまして！"
     else:
         reply = "ありがとうございます"
 
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
