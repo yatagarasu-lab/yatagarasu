@@ -1,3 +1,2 @@
 flask
-dropbox
-gunicorn
+requests
