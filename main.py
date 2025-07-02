@@ -1,3 +1,62 @@
+# 再度表示する（セッションリセットされたため）
+import ace_tools as tools
+import pandas as pd
+
+requirements_txt = """
+flask
+dropbox
+python-dotenv
+"""
+
+utils_py = """
+import hashlib
+import dropbox
+import os
+import requests
+
+# 重複判定: 同じハッシュ値のファイルかどうか
+def is_duplicate(content):
+    hash_value = hashlib.md5(content).hexdigest()
+    if not os.path.exists("hashes.txt"):
+        with open("hashes.txt", "w") as f:
+            f.write(hash_value + "\\n")
+        return False
+
+    with open("hashes.txt", "r+") as f:
+        hashes = f.read().splitlines()
+        if hash_value in hashes:
+            return True
+        f.write(hash_value + "\\n")
+        return False
+
+# 任意のファイル解析ロジック（仮のサンプル）
+def analyze_file(content):
+    text = content.decode("utf-8", errors="ignore")
+    lines = text.split("\\n")
+    word_count = sum(len(line.split()) for line in lines)
+    return f"ファイルの行数: {len(lines)} 行、単語数: {word_count} 語"
+
+# LINE通知関数
+def notify_line(message):
+    token = os.getenv("LINE_NOTIFY_TOKEN")
+    if not token:
+        print("LINEトークンが設定されていません")
+        return
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    data = {
+        "message": message
+    }
+    requests.post("https://notify-api.line.me/api/notify", headers=headers, data=data)
+"""
+
+env_template = """
+DROPBOX_TOKEN=あなたのDropboxアクセストークン
+LINE_NOTIFY_TOKEN=あなたのLINE Notifyトークン
+"""
+
+main_py = """
 from flask import Flask, request, jsonify
 import dropbox
 import os
@@ -12,71 +71,33 @@ dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        # Dropbox Webhook検証用 (challenge)
         challenge = request.args.get("challenge")
         return challenge, 200
 
     if request.method == "POST":
-        # Webhookが通知されたらファイルをスキャン
-        entries = dbx.files_list_folder(DROPBOX_FOLDER, recursive=True).entries
+        entries = dbx.files_list_folder(DROPBOX_FOLDER).entries
         for entry in entries:
             if isinstance(entry, dropbox.files.FileMetadata):
                 _, ext = os.path.splitext(entry.name)
-                if ext.lower() in [".txt", ".csv", ".xlsx", ".json", ".jpg", ".jpeg", ".png"]:
+                if ext.lower() in [".txt"]:
                     _, res = dbx.files_download(entry.path_display)
                     content = res.content
 
                     if is_duplicate(content):
                         dbx.files_delete_v2(entry.path_display)
                     else:
-                        result = analyze_file(content, entry.name)
-                        notify_line(f"✅新規ファイル解析結果\n📄{entry.name}\n\n{result}")
+                        result = analyze_file(content)
+                        notify_line(f"新規ファイル解析結果: {result}")
         return "OK", 200
-        import hashlib
-import os
-import openai
-import base64
-import requests
 
-# すでに処理済みのハッシュを一時的に保存（本番はDB推奨）
-processed_hashes = set()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
+"""
 
-# ファイルの重複チェック
-def is_duplicate(content: bytes) -> bool:
-    file_hash = hashlib.sha256(content).hexdigest()
-    if file_hash in processed_hashes:
-        return True
-    processed_hashes.add(file_hash)
-    return False
-
-# OpenAI でファイル解析
-def analyze_file(content: bytes, filename: str) -> str:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    try:
-        b64 = base64.b64encode(content).decode("utf-8")
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "あなたはデータ解析アシスタントです。アップロードされたファイルを読み取り、その内容を要約・解説してください。"},
-                {"role": "user", "content": f"ファイル名: {filename}\n以下のBase64形式のデータを解析してください:\n{b64}"}
-            ],
-            temperature=0.3,
-            max_tokens=1000,
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        return f"❌解析エラー: {e}"
-
-# LINE通知（LINE Notify使用）
-def notify_line(message: str):
-    token = os.getenv("LINE_NOTIFY_TOKEN")
-    if not token:
-        print("LINE通知トークンが未設定です")
-        return
-    url = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": f"Bearer {token}"}
-    data = {"message": message}
-    try:
-        requests.post(url, headers=headers, data=data)
-    except Exception as e:
-        print(f"LINE通知失敗: {e}")
+files = {
+    "main.py": main_py,
+    "utils.py": utils_py,
+    ".env": env_template,
+    "requirements.txt": requirements_txt,
+}
+tools.display_dataframe_to_user(name="Dropbox解析BOT完全コード一覧", dataframe=pd.DataFrame(files.items(), columns=["ファイル名", "コード"]))
