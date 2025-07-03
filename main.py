@@ -1,130 +1,93 @@
 import os
 import json
 import hashlib
-import dropbox
-import openai
-import requests
 from flask import Flask, request
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+import openai
+import dropbox
 
 app = Flask(__name__)
 
-# .env読み込み
-from dotenv import load_dotenv
-load_dotenv()
+# LINE設定
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_USER_ID = os.environ["LINE_USER_ID"]
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# LINE
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
+# OpenAI設定
+openai.api_key = os.environ["OPENAI_API_KEY"]
 
-# Dropbox
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# Dropbox設定
+DROPBOX_APP_KEY = os.environ["DROPBOX_APP_KEY"]
+DROPBOX_APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
+DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
+dbx = dropbox.Dropbox(oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+                      app_key=DROPBOX_APP_KEY,
+                      app_secret=DROPBOX_APP_SECRET)
 
-# OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-
-def get_dropbox_access_token():
-    url = "https://api.dropboxapi.com/oauth2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_APP_KEY,
-        "client_secret": DROPBOX_APP_SECRET,
-    }
-    response = requests.post(url, data=data)
-    return response.json().get("access_token")
-
-
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    dbx = dropbox.Dropbox(get_dropbox_access_token())
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
-
-
-def download_file(path):
-    dbx = dropbox.Dropbox(get_dropbox_access_token())
-    metadata, res = dbx.files_download(path)
-    return res.content
-
+# Dropbox内の対象フォルダ
+TARGET_FOLDER = "/Apps/slot-data-analyzer"
 
 def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+    return hashlib.md5(content).hexdigest()
 
+def list_files(folder_path):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    hash_map = {}
-    duplicates = []
+def download_file(path):
+    metadata, res = dbx.files_download(path)
+    return res.content.decode("utf-8", errors="ignore")
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            duplicates.append((path, hash_map[hash_value]))
-            dbx = dropbox.Dropbox(get_dropbox_access_token())
-            dbx.files_delete_v2(path)
-        else:
-            hash_map[hash_value] = path
-
-    return duplicates
-
-
-def analyze_file(path):
-    content = download_file(path)
+def summarize_with_gpt(text):
+    prompt = f"次の内容を要約してください：\n\n{text}\n\n--- 要約:"
     try:
-        text = content.decode("utf-8")
-    except:
-        text = "画像またはバイナリファイル（解析対象外）"
-    prompt = f"次のデータを要約して下さい:\n\n{text[:4000]}"
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
-
-
-def send_line_notify(message):
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}],
-    }
-    requests.post(url, headers=headers, json=data)
-
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.5
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[GPT要約エラー] {e}"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # Dropbox Webhookで通知があったらファイルを調査
-    folder_path = "/Apps/slot-data-analyzer"
-    files = list_files(folder_path)
-    if not files:
-        return "No files found", 200
+    try:
+        data = request.json
+        if "list_folder" in data.get("delta", {}):
+            changed_paths = [entry.get("path_display") for entry in list_files(TARGET_FOLDER)]
 
-    latest_file = sorted(files, key=lambda f: f.server_modified, reverse=True)[0]
-    result = analyze_file(latest_file.path_display)
-    duplicates = find_duplicates(folder_path)
+            hash_map = {}
+            latest_summary = ""
 
-    # 通知作成
-    message = f"🗂️ 新しいファイルを解析しました！\n\n📄 ファイル名: {latest_file.name}\n\n📝 要約:\n{result}"
-    if duplicates:
-        message += f"\n\n⚠️ 重複ファイル {len(duplicates)} 件削除済み"
+            for path in changed_paths:
+                content = download_file(path)
+                h = file_hash(content.encode("utf-8"))
+                if h in hash_map:
+                    # 重複ファイル → 削除
+                    dbx.files_delete_v2(path)
+                else:
+                    hash_map[h] = path
+                    # GPTで要約
+                    summary = summarize_with_gpt(content)
+                    latest_summary += f"📄 {os.path.basename(path)}:\n{summary}\n\n"
 
-    send_line_notify(message)
-    return "OK", 200
+            if latest_summary:
+                line_bot_api.push_message(
+                    LINE_USER_ID,
+                    TextSendMessage(text=latest_summary[:5000])
+                )
+        return "OK", 200
 
+    except Exception as e:
+        line_bot_api.push_message(
+            LINE_USER_ID,
+            TextSendMessage(text=f"[Webhookエラー]\n{e}")
+        )
+        return "ERROR", 500
 
 @app.route("/", methods=["GET"])
-def index():
-    return "Dropbox × GPT × LINE Bot は動作中です。", 200
-
-
-if __name__ == "__main__":
-    app.run(debug=True)
+def root():
+    return "Dropbox + GPT + LINE Bot is working!", 200
