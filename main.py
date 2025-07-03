@@ -1,59 +1,53 @@
 from flask import Flask, request, abort
-import requests
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+
 import os
 
 app = Flask(__name__)
 
-# 環境変数からLINEアクセストークンを取得
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")
+# 環境変数からLINEのアクセストークンとシークレットを取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
-def push_message(user_id, message):
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-    }
-    body = {
-        "to": user_id,
-        "messages": [
-            {
-                "type": "text",
-                "text": message
-            }
-        ]
-    }
-    response = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers=headers,
-        json=body
-    )
-    return response.status_code, response.text
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-@app.route("/", methods=["GET"])
-def health_check():
-    return "OK", 200
+@app.route("/")
+def home():
+    return "LINE BOT is running!"
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
+@app.route("/callback", methods=['POST'])
+def callback():
+    # LINEからのリクエスト
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
+
     try:
-        body = request.get_json()
-        print("Webhook received:", body)
-
-        for event in body["events"]:
-            if event["type"] == "message":
-                user_id = event["source"]["userId"]
-                message_text = event["message"]["text"]
-
-                # 🔽 ここでDropboxへのファイル保存やGPT解析を追加予定
-                # → 受信メッセージを処理し、結果をDropboxやGPTと連携
-
-                # 固定返信（例：ありがとうございます）
-                push_message(user_id, "ありがとうございます")
-
-        return "OK", 200
-    except Exception as e:
-        print("Error in webhook:", e)
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        app.logger.error("Invalid signature. Check channel secret/access token.")
         abort(400)
+
+    return 'OK'
+
+# メッセージ受信時の処理
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    message_text = event.message.text
+
+    # ログ出力
+    app.logger.info(f"User ID: {user_id}")
+    app.logger.info(f"Message: {message_text}")
+
+    # ユーザーに返信（固定メッセージ）
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="ありがとうございます")
+    )
 
 if __name__ == "__main__":
     app.run()
