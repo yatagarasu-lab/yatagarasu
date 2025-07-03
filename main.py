@@ -1,72 +1,89 @@
-import os
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, ImageMessage, TextSendMessage
 import dropbox
+import os
 import hashlib
-from flask import Flask, request
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
 import openai
 
-# 環境変数からトークン取得（Render環境変数で設定）
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+app = Flask(__name__)
+
+# 環境変数からトークン取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 openai.api_key = OPENAI_API_KEY
 
-# 既存ファイルのハッシュを保存（重複確認用）
-known_hashes = set()
+FOLDER_PATH = "/Apps/slot-data-analyzer"
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+def file_exists(folder_path):
+    try:
+        res = dbx.files_list_folder(folder_path)
+        return res.entries
+    except:
+        return []
 
-def summarize_content(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "次のファイルの内容を要約してください。"},
-            {"role": "user", "content": text}
-        ]
+def upload_file(file_name, file_data):
+    dbx.files_upload(file_data, f"{FOLDER_PATH}/{file_name}", mode=dropbox.files.WriteMode.overwrite)
+
+def get_file_hash(file_path):
+    _, res = dbx.files_download(file_path)
+    return res.content
+
+def analyze_file_content(file_data):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "画像の内容を要約し、重複がないか確認して分析してください。"},
+                {"role": "user", "content": "画像が届きました。内容をチェックしてください。"}
+            ]
+        )
+        return response.choices[0].message["content"]
+    except:
+        return "ファイルを受け取りました（要約機能は未使用です）"
+
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    user_id = event.source.user_id
+    message_id = event.message.id
+    file_name = f"{user_id}_{message_id}.jpg"
+
+    image_content = line_bot_api.get_message_content(message_id)
+    file_data = image_content.content
+
+    # ハッシュ生成で重複チェック
+    new_hash = hashlib.sha256(file_data).hexdigest()
+    entries = file_exists(FOLDER_PATH)
+    for entry in entries:
+        if not entry.name.endswith(".jpg"):
+            continue
+        existing_data = get_file_hash(f"{FOLDER_PATH}/{entry.name}")
+        if new_hash == hashlib.sha256(existing_data).hexdigest():
+            reply = "重複ファイルのため保存されませんでした。"
+            break
+    else:
+        upload_file(file_name, file_data)
+        reply = "画像をDropboxに保存しました。\n\n" + analyze_file_content(file_data)
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply)
     )
-    return response.choices[0].message.content.strip()
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    # Dropbox Webhook：ファイル変更イベントを受け取る
-    delta = request.get_json()
-    if not delta or "list_folder" not in delta:
-        return "No relevant data", 400
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
 
-    # 変更されたユーザーのアカウントID（必ずしも必要ではない）
-    for account_id in delta["list_folder"]["accounts"]:
-        # 特定フォルダ（Apps/slot-data-analyzer）内のファイルを取得
-        result = dbx.files_list_folder("/Apps/slot-data-analyzer")
-        for entry in result.entries:
-            if isinstance(entry, dropbox.files.FileMetadata):
-                _, res = dbx.files_download(entry.path_display)
-                content = res.content
-                h = file_hash(content)
-                if h in known_hashes:
-                    continue  # 重複なのでスキップ
-                known_hashes.add(h)
-
-                try:
-                    text = content.decode("utf-8", errors="ignore")
-                except Exception:
-                    text = "[バイナリファイル] 内容の解析不可"
-
-                summary = summarize_content(text)
-
-                # LINE通知送信
-                line_bot_api.push_message(
-                    LINE_USER_ID,
-                    TextSendMessage(text=f"📦新しいファイル: {entry.name}\n📄要約:\n{summary}")
-                )
-
-    return "OK", 200
-
-if __name__ == "__main__":
-    app.run(debug=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return "OK"
