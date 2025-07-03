@@ -2,11 +2,11 @@ import os
 import hashlib
 import dropbox
 
-# Dropbox APIアクセストークン（.envから読み込む想定）
+# Dropbox APIアクセストークン（.envから読み込み）
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# フォルダパス（固定でApps/slot-data-analyzerに）
+# 固定フォルダパス（自動作成される公式のアプリ領域）
 FOLDER_PATH = "/Apps/slot-data-analyzer"
 
 def list_files(folder_path=FOLDER_PATH):
