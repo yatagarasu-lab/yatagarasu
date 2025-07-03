@@ -1,2 +1,5 @@
 flask
-line-bot-sdk==3.4.0
+gunicorn
+dropbox
+requests
+python-dotenv
