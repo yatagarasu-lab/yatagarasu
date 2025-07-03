@@ -1,63 +1,71 @@
+import os
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from linebot.exceptions import InvalidSignatureError
-import os
+import dropbox
 
 app = Flask(__name__)
 
-# 環境変数からトークンを取得
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+# 環境変数の取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 
-line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(CHANNEL_SECRET)
+# LINE Botの初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-@app.route("/callback", methods=["POST"])
+# LINEユーザーID（あなた専用）
+LINE_USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"
+
+# LINE Webhookの受信エンドポイント
+@app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except Exception as e:
         abort(400)
+    return 'OK'
 
-    return "OK"
-
+# メッセージ受信時の処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_id = event.source.user_id
-    print(f"User ID: {user_id}")
-
-    reply_text = f"あなたのLINEユーザーIDは：\n{user_id}"
+    reply_text = "ありがとうございます"
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-    # ===== Dropboxアップロードテスト用コード =====
-import dropbox
-import os
-from flask import Flask
+# LINE Push通知送信関数
+def push_to_line(text):
+    try:
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
+        return "✅ LINE通知成功"
+    except Exception as e:
+        return f"❌ LINE通知失敗: {str(e)}"
 
-app = Flask(__name__)
+# LINE通知テスト用エンドポイント
+@app.route("/push-test")
+def push_test():
+    return push_to_line("📦 Dropbox連携テスト中です！")
 
+# Dropboxアップロードテストエンドポイント
 @app.route("/dropbox-test")
 def dropbox_test():
     try:
-        DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
         dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-
-        # ファイル内容とパス
         content = "これはDropboxへの自動アップロードのテストです。"
         path = "/Apps/slot-data-analyzer/スロット/GPT_アップロードテスト.txt"
-
-        # アップロード処理
         dbx.files_upload(content.encode(), path, mode=dropbox.files.WriteMode.overwrite)
+        push_to_line("✅ Dropboxアップロード成功！ファイルを確認してください。")
         return "✅ Dropboxへのアップロード成功！"
     except Exception as e:
+        push_to_line(f"❌ Dropboxアップロード失敗: {str(e)}")
         return f"❌ アップロード失敗: {str(e)}"
+
+# 起動確認用
+@app.route("/")
+def home():
+    return "✅ LINE BOT + Dropbox連携サーバー 起動中"
