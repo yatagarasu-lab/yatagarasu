@@ -1,7 +1,4 @@
 flask
-gunicorn
 dropbox
-requests
-python-dotenv
-line-bot-sdk
 openai
+requests
