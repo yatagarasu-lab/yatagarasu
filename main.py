@@ -39,3 +39,25 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+    # ===== Dropboxアップロードテスト用コード =====
+import dropbox
+import os
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/dropbox-test")
+def dropbox_test():
+    try:
+        DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+        dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+
+        # ファイル内容とパス
+        content = "これはDropboxへの自動アップロードのテストです。"
+        path = "/Apps/slot-data-analyzer/スロット/GPT_アップロードテスト.txt"
+
+        # アップロード処理
+        dbx.files_upload(content.encode(), path, mode=dropbox.files.WriteMode.overwrite)
+        return "✅ Dropboxへのアップロード成功！"
+    except Exception as e:
+        return f"❌ アップロード失敗: {str(e)}"
