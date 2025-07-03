@@ -1,89 +1,87 @@
 import os
+import json
 import hashlib
+from flask import Flask, request
 import dropbox
 import openai
-from flask import Flask, request
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
-from datetime import datetime
 
 app = Flask(__name__)
 
-# 環境変数
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# === APIキー類 ===
+DROPBOX_TOKEN = os.environ['DROPBOX_ACCESS_TOKEN']
+LINE_CHANNEL_ACCESS_TOKEN = os.environ['LINE_CHANNEL_ACCESS_TOKEN']
+LINE_USER_ID = os.environ['LINE_USER_ID']
+OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
 
-# 各API初期化
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+# === インスタンス生成 ===
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 openai.api_key = OPENAI_API_KEY
 
-# Dropbox監視フォルダ
-MONITOR_FOLDER = "/Apps/slot-data-analyzer"
-
-# ファイルハッシュ取得（重複判定）
+# === ハッシュ比較で重複検出 ===
 def file_hash(content):
     return hashlib.md5(content).hexdigest()
 
-# Dropboxファイル一覧
-def list_files(folder_path):
-    return dbx.files_list_folder(folder_path).entries
+# === Dropboxのファイル一覧取得 ===
+def list_files(folder="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder)
+    return res.entries
 
-# ファイル読み込み
+# === ファイルをダウンロード ===
 def download_file(path):
-    _, res = dbx.files_download(path)
+    metadata, res = dbx.files_download(path)
     return res.content
 
-# 重複削除機能
-def find_duplicates(folder_path):
+# === GPTで要約生成（記憶ベース対応） ===
+def summarize_content(content, filename=""):
+    try:
+        text = content.decode('utf-8', errors='ignore')
+    except:
+        text = "（画像またはバイナリデータ）"
+
+    prompt = f"次の内容を日本語で要約してください。\n\n【ファイル名】{filename}\n\n{text}\n\nまた、これまでのやり取りや記憶ベースで補足説明がある場合は追記してください。"
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=500
+    )
+    return response.choices[0].message.content.strip()
+
+# === ファイル保存先フォルダを指定して保存 ===
+def save_summary_to_dropbox(summary, filename):
+    path = f"/Apps/slot-data-analyzer/要約/{filename}.txt"
+    dbx.files_upload(summary.encode("utf-8"), path, mode=dropbox.files.WriteMode("overwrite"))
+
+# === LINE通知送信 ===
+def notify_line(text):
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
+
+# === Webhookエンドポイント ===
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    folder_path = "/Apps/slot-data-analyzer"
     files = list_files(folder_path)
     hash_map = {}
+
     for file in files:
         path = file.path_display
         content = download_file(path)
         hash_value = file_hash(content)
+
         if hash_value in hash_map:
-            dbx.files_delete_v2(path)
+            dbx.files_delete_v2(path)  # 重複なら削除
+            continue
         else:
             hash_map[hash_value] = path
+            summary = summarize_content(content, filename=file.name)
+            save_summary_to_dropbox(summary, file.name)
+            notify_line(f"🧠 新しいファイル「{file.name}」を要約してDropboxに保存しました。")
 
-# GPTの記録をDropboxに保存
-def export_gpt_memory():
-    now = datetime.now().strftime("%Y-%m-%d_%H%M")
-    gpt_summary = (
-        "【GPT記録】\n"
-        "- 北斗：末尾3付近が高設定傾向あり。\n"
-        "- グール：エピソードボーナス頻発は高設定示唆。\n"
-        "- カスタム：朝カス・1000カス対応店舗の情報収集中。\n"
-        "- 店舗傾向：5のつく日→ウエスタン葛西など強傾向。\n"
-        "- 台番予測：直近は2000番台・3000番台に投入多し。\n"
-    )
-    filepath = f"{MONITOR_FOLDER}/GPT記録/gpt_{now}.txt"
-    dbx.files_upload(gpt_summary.encode(), filepath, mode=dropbox.files.WriteMode("add"))
-    return filepath
+    return "OK", 200
 
-# LINE通知
-def send_line_notify(msg):
-    try:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=msg))
-    except Exception as e:
-        print("LINE通知エラー:", e)
-
-# Webhook受信
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        return request.args.get("challenge", ""), 200
-    elif request.method == "POST":
-        print("Dropbox更新を検知")
-        find_duplicates(MONITOR_FOLDER)
-        export_path = export_gpt_memory()
-        send_line_notify(f"🧠 GPT記録をDropboxに保存しました：\n{export_path}")
-        return "", 200
-
-# 動作確認用
+# === Renderトップページ対応 ===
 @app.route("/")
 def index():
     return "✅ GPT自動記録 & Dropbox連携中", 200
