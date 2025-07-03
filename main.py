@@ -1,74 +1,100 @@
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import openai
 import os
-from dotenv import load_dotenv
+import hashlib
+import json
+from flask import Flask, request, jsonify
+import dropbox
+import openai
+import requests
 
-# .env読み込み
-load_dotenv()
-
-# Flaskアプリ起動
 app = Flask(__name__)
 
-# LINE設定
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+# 環境変数から取得
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-# OpenAI設定
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ファイル一覧取得
+def list_files(folder_path):
+    files = []
+    result = dbx.files_list_folder(folder_path)
+    files.extend(result.entries)
+    while result.has_more:
+        result = dbx.files_list_folder_continue(result.cursor)
+        files.extend(result.entries)
+    return files
 
-# ✅ Dropbox Webhookエンドポイント
+# ファイル内容取得
+def download_file(path):
+    metadata, res = dbx.files_download(path)
+    return res.content
+
+# ハッシュ生成
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
+
+# LINE通知
+def send_line_message(message):
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message}]
+    }
+    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(data))
+
+# GPT要約
+def summarize_content(content):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "以下の内容を日本語で簡潔に要約してください。"},
+                {"role": "user", "content": content.decode("utf-8", errors="ignore")}
+            ]
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        return f"要約失敗: {str(e)}"
+
+# 重複チェック＆処理
+def handle_new_files():
+    files = list_files("/Apps/slot-data-analyzer")
+    hash_map = {}
+    for file in files:
+        if isinstance(file, dropbox.files.FileMetadata):
+            path = file.path_display
+            content = download_file(path)
+            hash_value = file_hash(content)
+
+            if hash_value in hash_map:
+                # 重複 → 削除
+                dbx.files_delete_v2(path)
+                continue
+            else:
+                hash_map[hash_value] = path
+                # GPTで要約
+                summary = summarize_content(content)
+                # LINE通知
+                send_line_message(f"🗂 新ファイル: {file.name}\n📄 要約:\n{summary}")
+                # 処理済みフォルダへ移動
+                new_path = "/Apps/slot-data-analyzer/processed/" + file.name
+                dbx.files_move_v2(from_path=path, to_path=new_path, allow_shared_folder=True, autorename=True)
+
+# Webhook受信処理
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        challenge = request.args.get("challenge")
-        if challenge:
-            return challenge, 200
-        else:
-            return "No challenge found", 400
-    if request.method == "POST":
-        print("✅ Dropbox webhook received!")
+        return request.args.get("challenge")
+    elif request.method == "POST":
+        print("Dropbox Webhook received.")
+        handle_new_files()
         return "", 200
 
-# ✅ LINE callbackエンドポイント
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
-
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-
-    return "OK"
-
-# ✅ LINEメッセージ応答処理（OpenAI連携）
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text
-
-    # ChatGPTで応答生成
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",  # 必要に応じて "gpt-4"
-        messages=[
-            {"role": "user", "content": user_message}
-        ]
-    )
-
-    reply_text = response["choices"][0]["message"]["content"]
-
-    # LINEへ返信
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
-
-# ✅ アプリ起動
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
