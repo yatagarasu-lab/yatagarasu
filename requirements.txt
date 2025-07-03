@@ -1,4 +1,4 @@
 flask
-dropbox
 openai
 requests
+gunicorn
