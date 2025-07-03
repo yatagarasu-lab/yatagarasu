@@ -1,93 +1,89 @@
 import os
-import json
 import hashlib
-from flask import Flask, request
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-import openai
 import dropbox
+from flask import Flask, request
+import openai
+import requests
+
+# 環境変数から読み込む（Renderで設定済みのもの）
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 app = Flask(__name__)
 
-# LINE設定
-LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-LINE_USER_ID = os.environ["LINE_USER_ID"]
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+# Dropbox 接続
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-# OpenAI設定
-openai.api_key = os.environ["OPENAI_API_KEY"]
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
 
-# Dropbox設定
-DROPBOX_APP_KEY = os.environ["DROPBOX_APP_KEY"]
-DROPBOX_APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
-DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
-dbx = dropbox.Dropbox(oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-                      app_key=DROPBOX_APP_KEY,
-                      app_secret=DROPBOX_APP_SECRET)
+def download_file(file_path):
+    _, res = dbx.files_download(file_path)
+    return res.content
 
-# Dropbox内の対象フォルダ
-TARGET_FOLDER = "/Apps/slot-data-analyzer"
+def file_hash(file_content):
+    return hashlib.sha256(file_content).hexdigest()
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+def notify_line(message):
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message}]
+    }
+    requests.post(url, headers=headers, json=body)
 
-def list_files(folder_path):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+def analyze_with_gpt(file_text):
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "これはDropboxにアップロードされたスロット関連のデータです。内容を要約し、重要な点を抽出してください。"},
+            {"role": "user", "content": file_text}
+        ]
+    )
+    return response.choices[0].message.content
 
-def download_file(path):
-    metadata, res = dbx.files_download(path)
-    return res.content.decode("utf-8", errors="ignore")
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+        if hash_value in hash_map:
+            dbx.files_delete_v2(path)  # 重複ファイルを削除
+        else:
+            hash_map[hash_value] = path
 
-def summarize_with_gpt(text):
-    prompt = f"次の内容を要約してください：\n\n{text}\n\n--- 要約:"
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300,
-            temperature=0.5
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"[GPT要約エラー] {e}"
-
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    try:
-        data = request.json
-        if "list_folder" in data.get("delta", {}):
-            changed_paths = [entry.get("path_display") for entry in list_files(TARGET_FOLDER)]
+    if request.method == "GET":
+        # Dropbox Verification 用
+        challenge = request.args.get("challenge")
+        return challenge, 200
 
-            hash_map = {}
-            latest_summary = ""
+    elif request.method == "POST":
+        try:
+            # 重複を削除
+            find_duplicates()
+            notify_line("Dropboxにファイルが追加されました。解析を開始します。")
+            return "Webhook受信済み", 200
+        except Exception as e:
+            notify_line(f"エラー発生: {str(e)}")
+            return "エラー", 500
 
-            for path in changed_paths:
-                content = download_file(path)
-                h = file_hash(content.encode("utf-8"))
-                if h in hash_map:
-                    # 重複ファイル → 削除
-                    dbx.files_delete_v2(path)
-                else:
-                    hash_map[h] = path
-                    # GPTで要約
-                    summary = summarize_with_gpt(content)
-                    latest_summary += f"📄 {os.path.basename(path)}:\n{summary}\n\n"
-
-            if latest_summary:
-                line_bot_api.push_message(
-                    LINE_USER_ID,
-                    TextSendMessage(text=latest_summary[:5000])
-                )
-        return "OK", 200
-
-    except Exception as e:
-        line_bot_api.push_message(
-            LINE_USER_ID,
-            TextSendMessage(text=f"[Webhookエラー]\n{e}")
-        )
-        return "ERROR", 500
+    return "無効なリクエスト", 400
 
 @app.route("/", methods=["GET"])
-def root():
-    return "Dropbox + GPT + LINE Bot is working!", 200
+def home():
+    return "動作中（Slot GPT Analyzer）", 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
