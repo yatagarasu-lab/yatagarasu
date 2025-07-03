@@ -2,44 +2,37 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import os
 
 app = Flask(__name__)
 
-# 環境変数からLINEのトークンとシークレットを取得
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+# 自分のLINEチャネルアクセストークンとシークレットを入れる
+line_bot_api = LineBotApi('YOUR_CHANNEL_ACCESS_TOKEN')
+handler = WebhookHandler('YOUR_CHANNEL_SECRET')
 
-# Botインスタンス作成
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Webhookの受け口
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature')
-
-    # リクエストボディ取得
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-
-    # 検証（失敗したら400エラー）
+    print("Request body: " + body)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("Invalid signature. Check your channel access token/secret.")
         abort(400)
-
     return 'OK'
 
-# テキストメッセージを受信したときの処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    reply_text = "ありがとうございます"
+    # 👇ここでユーザーIDをログに出力
+    print(f"User ID: {event.source.user_id}")
+    
+    # メッセージ内容もログ出力
+    print(f"Message: {event.message.text}")
+    
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=reply_text)
+        TextSendMessage(text='ありがとうございます')
     )
 
-# ローカル動作用（Renderでは不要だが記述しておいてOK）
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run()
