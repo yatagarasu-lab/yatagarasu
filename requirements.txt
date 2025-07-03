@@ -2,6 +2,6 @@ flask
 gunicorn
 dropbox
 openai
-python-dotenv
 line-bot-sdk
+python-dotenv
 requests
