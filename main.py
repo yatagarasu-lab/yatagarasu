@@ -1,100 +1,79 @@
+from flask import Flask, request
 import os
 import hashlib
-import json
-from flask import Flask, request, jsonify
-import dropbox
-import openai
 import requests
+import dropbox
 
 app = Flask(__name__)
 
-# 環境変数から取得
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# LINE設定
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-openai.api_key = OPENAI_API_KEY
+# Dropbox設定
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
 
-# ファイル一覧取得
-def list_files(folder_path):
-    files = []
-    result = dbx.files_list_folder(folder_path)
-    files.extend(result.entries)
-    while result.has_more:
-        result = dbx.files_list_folder_continue(result.cursor)
-        files.extend(result.entries)
-    return files
-
-# ファイル内容取得
-def download_file(path):
-    metadata, res = dbx.files_download(path)
-    return res.content
-
-# ハッシュ生成
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
-
-# LINE通知
+# LINE通知関数
 def send_line_message(message):
     headers = {
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    data = {
+    body = {
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": message}]
     }
-    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, data=json.dumps(data))
+    response = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=body)
+    print(f"LINE送信ステータス: {response.status_code}, 応答: {response.text}")
 
-# GPT要約
-def summarize_content(content):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下の内容を日本語で簡潔に要約してください。"},
-                {"role": "user", "content": content.decode("utf-8", errors="ignore")}
-            ]
-        )
-        return response.choices[0].message["content"]
-    except Exception as e:
-        return f"要約失敗: {str(e)}"
+# Dropboxファイル一覧取得
+def list_files(path):
+    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+    files = dbx.files_list_folder(path).entries
+    return [f for f in files if isinstance(f, dropbox.files.FileMetadata)]
 
-# 重複チェック＆処理
-def handle_new_files():
-    files = list_files("/Apps/slot-data-analyzer")
+# Dropboxファイル取得
+def download_file(path):
+    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+    _, res = dbx.files_download(path)
+    return res.content
+
+# 重複チェック用ハッシュ
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
+
+# 重複ファイルチェック＆通知
+def check_and_notify_duplicates():
+    files = list_files(DROPBOX_FOLDER)
     hash_map = {}
+
     for file in files:
-        if isinstance(file, dropbox.files.FileMetadata):
-            path = file.path_display
-            content = download_file(path)
-            hash_value = file_hash(content)
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
 
-            if hash_value in hash_map:
-                # 重複 → 削除
-                dbx.files_delete_v2(path)
-                continue
-            else:
-                hash_map[hash_value] = path
-                # GPTで要約
-                summary = summarize_content(content)
-                # LINE通知
-                send_line_message(f"🗂 新ファイル: {file.name}\n📄 要約:\n{summary}")
-                # 処理済みフォルダへ移動
-                new_path = "/Apps/slot-data-analyzer/processed/" + file.name
-                dbx.files_move_v2(from_path=path, to_path=new_path, allow_shared_folder=True, autorename=True)
+        if hash_value in hash_map:
+            msg = f"⚠️ 重複ファイル検出\n{path}\n（同一: {hash_map[hash_value]}）"
+            send_line_message(msg)
+            print(msg)
+            # dbx.files_delete_v2(path)  # ←削除したい場合は有効化
+        else:
+            hash_map[hash_value] = path
+            msg = f"✅ 新規ファイル：{os.path.basename(path)}"
+            send_line_message(msg)
+            print(msg)
 
-# Webhook受信処理
+# Webhook受信
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         return request.args.get("challenge")
-    elif request.method == "POST":
-        print("Dropbox Webhook received.")
-        handle_new_files()
-        return "", 200
 
+    print("✅ Dropbox Webhook Received")
+    check_and_notify_duplicates()
+    return "OK", 200
+
+# Render実行用
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True)
