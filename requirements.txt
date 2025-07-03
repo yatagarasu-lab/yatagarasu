@@ -1,5 +1,6 @@
 flask
-gunicorn
-dropbox
 line-bot-sdk
-python-dotenv
+dropbox
+requests
+openai
+gunicorn
