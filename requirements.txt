@@ -3,5 +3,5 @@ gunicorn
 dropbox
 openai
 line-bot-sdk
-python-dotenv
 requests
+python-dotenv
