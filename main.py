@@ -6,31 +6,31 @@ import os
 
 app = Flask(__name__)
 
-# 環境変数からチャネルシークレットとアクセストークンを取得
+# 環境変数からLINEのトークンとシークレットを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 
+# Botインスタンス作成
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# Webhookの受け口
 @app.route("/callback", methods=['POST'])
 def callback():
-    # リクエストヘッダーから署名を取得
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature')
 
-    # リクエストボディを取得
+    # リクエストボディ取得
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
 
+    # 検証（失敗したら400エラー）
     try:
-        # Webhookのリクエストボディをハンドラーで処理
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
 
     return 'OK'
 
-# メッセージイベント処理
+# テキストメッセージを受信したときの処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     reply_text = "ありがとうございます"
@@ -39,6 +39,7 @@ def handle_message(event):
         TextSendMessage(text=reply_text)
     )
 
+# ローカル動作用（Renderでは不要だが記述しておいてOK）
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
