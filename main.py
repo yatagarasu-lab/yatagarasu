@@ -1,103 +1,81 @@
 import os
-import hashlib
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+
 import dropbox
-from flask import Flask, request
-from openai import OpenAI
-from dotenv import load_dotenv
+from datetime import datetime
+import hashlib
 
-# 環境変数の読み込み（Renderでは .env 不要）
-load_dotenv()
-
-# 初期化
+# Flaskアプリ初期化
 app = Flask(__name__)
-DROPBOX_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")  # 固定ユーザー通知用
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-openai = OpenAI(api_key=OPENAI_API_KEY)
+# 環境変数からトークン取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 
-# ファイルのSHA256ハッシュ生成（重複判定用）
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+# LINE API初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Dropboxフォルダ内のファイル一覧取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+# Dropbox API初期化
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# Dropboxファイルをダウンロード
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content
+# ファイルの保存と重複チェック
+def save_to_dropbox(text, user_id):
+    folder_path = "/Apps/slot-data-analyzer"
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{user_id}.txt"
+    file_path = f"{folder_path}/{filename}"
+    content = text.encode("utf-8")
 
-# GPTで要約・解析
-def analyze_content(content):
-    text = content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else content
-    prompt = f"以下のスロットデータを要約・解析してください:\n\n{text}"
-    res = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "あなたはスロット専門のデータアナリストです。"},
-            {"role": "user", "content": prompt}
-        ]
+    # 重複チェック（ハッシュ）
+    hash_value = hashlib.sha256(content).hexdigest()
+    for entry in dbx.files_list_folder(folder_path).entries:
+        if isinstance(entry, dropbox.files.FileMetadata):
+            existing_content = dbx.files_download(entry.path_lower)[1].content
+            if hashlib.sha256(existing_content).hexdigest() == hash_value:
+                print(f"重複データ検出：{filename}")
+                return
+
+    # 保存
+    dbx.files_upload(content, file_path)
+    print(f"保存完了：{filename}")
+
+# ✅ ← このルートが必要！
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return "OK"
+
+# メッセージ処理
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_id = event.source.user_id
+    text = event.message.text
+
+    # Dropboxに保存
+    save_to_dropbox(text, user_id)
+
+    # 応答
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="ありがとうございます")
     )
-    return res.choices[0].message.content.strip()
 
-# LINE通知送信
-def send_line_message(message):
-    import requests
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    body = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}]
-    }
-    res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=body)
-    return res.status_code
-
-# 重複チェックと要約送信
-def process_latest_file():
-    folder = "/Apps/slot-data-analyzer"
-    files = sorted(list_files(folder), key=lambda x: x.server_modified, reverse=True)
-    hash_map = {}
-
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        h = file_hash(content)
-
-        if h in hash_map:
-            print(f"🧹 重複ファイル削除: {path}")
-            dbx.files_delete_v2(path)
-        else:
-            hash_map[h] = path
-            summary = analyze_content(content)
-            send_line_message(f"📊 ファイル: {file.name}\n\n{summary}")
-            break
-
-# 📍Renderルート確認用
+# 動作確認用
 @app.route("/", methods=["GET"])
-def home():
-    return "Hello from Slot GPT Analyzer!", 200
+def hello():
+    return "Hello, Render!"
 
-# 📍Dropbox Webhook対応
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        return request.args.get("challenge", "No challenge"), 200
-    elif request.method == "POST":
-        print("📩 Dropbox webhook POST 受信")
-        try:
-            process_latest_file()
-            return "OK", 200
-        except Exception as e:
-            print("❌ 処理失敗:", e)
-            return "Error", 500
-
-# 本番環境向け
+# 起動（ローカル確認用）
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
