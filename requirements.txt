@@ -3,3 +3,4 @@ gunicorn
 dropbox
 requests
 python-dotenv
+line-bot-sdk
