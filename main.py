@@ -5,7 +5,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
-# 自分のLINEチャネルアクセストークンとシークレットを入れる
+# 自分のチャネルアクセストークンとチャネルシークレットを入れてください
 line_bot_api = LineBotApi('YOUR_CHANNEL_ACCESS_TOKEN')
 handler = WebhookHandler('YOUR_CHANNEL_SECRET')
 
@@ -13,7 +13,7 @@ handler = WebhookHandler('YOUR_CHANNEL_SECRET')
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    print("Request body: " + body)
+    print("Request body: " + body)  # ← これもあると便利
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -23,12 +23,13 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    # 👇ここでユーザーIDをログに出力
-    print(f"User ID: {event.source.user_id}")
-    
-    # メッセージ内容もログ出力
-    print(f"Message: {event.message.text}")
-    
+    user_id = event.source.user_id
+    user_message = event.message.text
+
+    # 👇ここが重要：ユーザーIDとメッセージをログに出す
+    print(f"User ID: {user_id}")
+    print(f"Message: {user_message}")
+
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text='ありがとうございます')
