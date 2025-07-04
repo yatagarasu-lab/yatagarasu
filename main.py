@@ -1,7 +1,7 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 import os
 import dropbox
 import hashlib
@@ -25,28 +25,28 @@ LINE_USER_ID = os.getenv("LINE_USER_ID")
 # Flaskアプリ
 app = Flask(__name__)
 
-# GPTクライアント
+# OpenAIクライアント
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# SHA256で内容のハッシュを取る
+# ハッシュ計算（重複判定用）
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
-# Dropboxに保存
+# Dropboxへ保存
 def save_to_dropbox(file_path, content):
     dbx.files_upload(content, file_path, mode=dropbox.files.WriteMode.overwrite)
 
-# Dropbox内のファイル一覧取得
+# Dropbox内のファイル一覧
 def list_files(folder_path):
     result = dbx.files_list_folder(folder_path)
     return result.entries
 
-# Dropboxからファイルダウンロード
+# Dropboxからダウンロード
 def download_file(path):
     _, res = dbx.files_download(path)
     return res.content
 
-# 重複チェック
+# 重複判定
 def is_duplicate(new_content):
     new_hash = file_hash(new_content)
     for file in list_files(DROPBOX_FOLDER):
@@ -55,18 +55,22 @@ def is_duplicate(new_content):
             return True, file.name
     return False, None
 
-# OpenAIによる内容の要約
+# GPTで要約（画像orテキスト）
 def analyze_file(content):
+    try:
+        decoded = content.decode("utf-8", errors="ignore")
+    except:
+        decoded = "[バイナリデータ]"
     response = openai_client.chat.completions.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "画像またはテキストの内容をスロットイベントデータとして要約してください"},
-            {"role": "user", "content": content.decode("utf-8", errors="ignore")}
+            {"role": "system", "content": "画像やテキストの内容をスロットイベントの要約として返してください"},
+            {"role": "user", "content": decoded}
         ]
     )
     return response.choices[0].message.content.strip()
 
-# Webhookのルート（LINE BOT連携）
+# Webhookエンドポイント
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers["X-Line-Signature"]
@@ -89,9 +93,9 @@ def handle_text_message(event):
     if not duplicate:
         save_to_dropbox(file_path, text)
         summary = analyze_file(text)
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"要約:\n{summary}"))
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"要約:\n{summary}"))
     else:
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複ファイルのためスキップしました"))
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="⚠️ 重複ファイルのためスキップしました"))
 
 # 画像メッセージ処理
 @handler.add(MessageEvent, message=ImageMessage)
@@ -105,14 +109,10 @@ def handle_image_message(event):
     if not duplicate:
         save_to_dropbox(file_path, image_data)
         summary = analyze_file(image_data)
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"画像解析結果:\n{summary}"))
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"🖼️画像解析結果:\n{summary}"))
     else:
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複画像のためスキップしました"))
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="⚠️ 重複画像のためスキップしました"))
 
-# トップページ確認用ルート（Render確認用）
-@app.route("/", methods=["GET"])
-def root():
-    return "LINE BOT is running!"
-
+# アプリ起動
 if __name__ == "__main__":
     app.run()
