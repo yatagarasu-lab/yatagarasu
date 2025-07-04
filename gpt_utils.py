@@ -1,46 +1,45 @@
-import os
 import openai
-from dotenv import load_dotenv
+import os
+from PIL import Image
+import io
+import base64
 
-load_dotenv()
+openai.api_key = os.environ["OPENAI_API_KEY"]
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-def process_with_gpt_text(text: str) -> str:
-    """テキストをGPTで要約・分類"""
-    prompt = (
-        "以下のスロット関連の情報を要約し、機種名・台番号・示唆内容・設定推測（高設定・中間・低設定）などを明確に分類してください：\n\n"
-        f"{text}\n\n"
-        "出力は簡潔にまとめてください。"
-    )
+def process_with_gpt(text):
+    """テキスト内容をGPTで処理（解析 or 要約）"""
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
-            temperature=0.3,
+            messages=[
+                {"role": "system", "content": "スロット設定情報を要約・分析してください。"},
+                {"role": "user", "content": text}
+            ]
         )
-        return response["choices"][0]["message"]["content"]
+        result = response.choices[0].message.content
+        print("🧠 GPT結果:", result)
+        return result
     except Exception as e:
-        return f"GPT解析エラー: {str(e)}"
+        print("⚠️ GPT処理エラー:", e)
+        return None
 
-def process_with_gpt_image(image_bytes: bytes) -> str:
-    """画像をOCR＋GPTで処理し要約（画像内のテキストを読み取って解析）"""
+def process_with_gpt_image(image_bytes):
+    """画像内容をGPTで処理（OCR＋分析）"""
     try:
-        # 画像内のテキストをOCRとして読み取ってGPTに渡す（例：Base64処理なども可能）
-        prompt = (
-            "以下はスロットの実戦報告や示唆画面の画像です。読み取れる内容を要約し、示唆内容や設定推測を明記してください。"
-        )
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
         response = openai.ChatCompletion.create(
             model="gpt-4-vision-preview",
             messages=[
                 {"role": "user", "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_bytes.decode()}}
+                    {"type": "text", "text": "この画像からスロット設定を推測・要約してください"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
                 ]}
             ],
             max_tokens=1000
         )
-        return response["choices"][0]["message"]["content"]
+        result = response.choices[0].message.content
+        print("🧠 GPT画像分析結果:", result)
+        return result
     except Exception as e:
-        return f"画像解析エラー: {str(e)}"
+        print("⚠️ GPT画像処理エラー:", e)
+        return None
