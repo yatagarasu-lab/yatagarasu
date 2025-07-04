@@ -2,33 +2,36 @@ import dropbox
 import hashlib
 import os
 
-# Dropboxアクセストークンの読み込み
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+# Dropboxクライアント初期化
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-def upload_file(file_path, dropbox_path):
-    """ローカルファイルをDropboxにアップロード"""
-    with open(file_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-
-def upload_bytes(content, dropbox_path):
-    """バイナリデータをDropboxにアップロード"""
-    dbx.files_upload(content, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-
-def download_file(dropbox_path):
-    """Dropboxからファイルをダウンロード"""
-    metadata, res = dbx.files_download(dropbox_path)
-    return res.content
-
 def list_files(folder_path="/Apps/slot-data-analyzer"):
-    """指定フォルダ内のファイルを一覧取得"""
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+    """指定フォルダ内のファイル一覧を取得"""
+    try:
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except Exception as e:
+        print(f"📁 フォルダ一覧取得失敗: {e}")
+        return []
 
-def delete_file(dropbox_path):
-    """Dropboxのファイルを削除"""
-    dbx.files_delete_v2(dropbox_path)
+def download_file(path):
+    """Dropboxからファイルをバイナリでダウンロード"""
+    try:
+        metadata, res = dbx.files_download(path)
+        return res.content
+    except Exception as e:
+        print(f"⬇️ ダウンロード失敗（{path}）: {e}")
+        return None
 
 def file_hash(content):
-    """ファイル内容からSHA-256のハッシュを生成"""
+    """ファイルのSHA256ハッシュを計算"""
     return hashlib.sha256(content).hexdigest()
+
+def delete_file(path):
+    """Dropbox上のファイルを削除"""
+    try:
+        dbx.files_delete_v2(path)
+        print(f"🗑️ 削除成功: {path}")
+    except Exception as e:
+        print(f"⚠️ 削除失敗（{path}）: {e}")
