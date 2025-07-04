@@ -1,67 +1,44 @@
 import dropbox
-import os
 import hashlib
-import io
-import zipfile
+import os
 
-# Dropboxアクセストークン（環境変数から取得）
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
 def list_files(folder_path):
-    """指定フォルダ内のファイル一覧を取得"""
+    """Dropboxフォルダ内のファイル一覧を取得"""
     try:
-        res = dbx.files_list_folder(folder_path)
-        return res.entries
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
     except Exception as e:
-        print(f"Dropbox list_files エラー: {e}")
+        print(f"⚠️ ファイル一覧取得失敗: {e}")
         return []
 
 def download_file(path):
-    """Dropboxからファイルをダウンロード（バイナリで返す）"""
+    """Dropbox上のファイルをバイナリでダウンロード"""
     try:
-        metadata, res = dbx.files_download(path)
+        _, res = dbx.files_download(path)
         return res.content
     except Exception as e:
-        print(f"Dropbox download エラー: {e}")
-        return b""
+        print(f"⚠️ ファイルダウンロード失敗: {e}")
+        return None
 
-def upload_file(path, content):
-    """Dropboxへファイルをアップロード"""
-    try:
-        dbx.files_upload(content, path, mode=dropbox.files.WriteMode.overwrite)
-        print(f"✅ アップロード成功: {path}")
-    except Exception as e:
-        print(f"Dropbox upload エラー: {e}")
+def file_hash(content):
+    """バイナリ内容のSHA256ハッシュを計算"""
+    return hashlib.sha256(content).hexdigest()
 
 def delete_file(path):
     """Dropbox上のファイルを削除"""
     try:
         dbx.files_delete_v2(path)
-        print(f"🗑️ 削除完了: {path}")
+        print(f"🗑️ 削除成功: {path}")
     except Exception as e:
-        print(f"Dropbox delete エラー: {e}")
+        print(f"⚠️ 削除失敗: {e}")
 
-def file_hash(content):
-    """ファイル内容からSHA256ハッシュを生成"""
-    return hashlib.sha256(content).hexdigest()
-
-def compress_and_upload_zip(files: list, zip_path="/Apps/slot-data-analyzer/latest_upload.zip"):
-    """
-    与えられたファイルパスリストをZIPにまとめ、Dropboxへアップロード
-    files: Dropbox内のファイルパス（例: /Apps/slot-data-analyzer/xxx.txt）
-    """
+def upload_file(file_bytes: bytes, dropbox_path: str):
+    """バイナリデータをDropboxにアップロード"""
     try:
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for path in files:
-                filename = os.path.basename(path)
-                content = download_file(path)
-                if content:
-                    zipf.writestr(filename, content)
-
-        buffer.seek(0)
-        upload_file(zip_path, buffer.read())
-        print("✅ 圧縮とアップロード完了")
+        dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+        print(f"✅ アップロード成功: {dropbox_path}")
     except Exception as e:
-        print(f"ZIP圧縮エラー: {e}")
+        print(f"⚠️ アップロード失敗: {e}")
