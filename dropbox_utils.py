@@ -1,19 +1,39 @@
 # dropbox_utils.py
-import os
 import dropbox
-import hashlib
-from dotenv import load_dotenv
-from gpt_utils import analyze_file_content
-from line_utils import push_message_to_line
+import os
+from dropbox.files import WriteMode
+from dropbox.exceptions import ApiError
+from dropbox_auth import get_dropbox_access_token
 
-load_dotenv()
-DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-WATCH_FOLDER = os.getenv("DROPBOX_WATCH_FOLDER", "/Apps/slot-data-analyzer")
+def get_dropbox_client():
+    access_token = get_dropbox_access_token()
+    return dropbox.Dropbox(oauth2_access_token=access_token)
 
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+def upload_file(file_path, dropbox_path):
+    dbx = get_dropbox_client()
+    with open(file_path, "rb") as f:
+        dbx.files_upload(f.read(), dropbox_path, mode=WriteMode("overwrite"))
 
-def handle_dropbox_event():
-    files = list_files(WATCH_FOLDER)
+def download_file(dropbox_path):
+    dbx = get_dropbox_client()
+    metadata, res = dbx.files_download(dropbox_path)
+    return res.content
+
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    try:
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except ApiError as e:
+        print(f"Dropbox list_files error: {e}")
+        return []
+
+def file_hash(content):
+    import hashlib
+    return hashlib.sha256(content).hexdigest()
+
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
     hash_map = {}
 
     for file in files:
@@ -22,20 +42,8 @@ def handle_dropbox_event():
         hash_value = file_hash(content)
 
         if hash_value in hash_map:
-            dbx.files_delete_v2(path)
-            print(f"重複ファイル削除: {path}")
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            # dbx = get_dropbox_client()
+            # dbx.files_delete_v2(path)  # 重複削除するなら有効化
         else:
             hash_map[hash_value] = path
-            result = analyze_file_content(content)
-            push_message_to_line(f"📝解析完了: {path}\n\n{result[:1000]}")
-
-def list_files(folder_path):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
-
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content.decode('utf-8')
-
-def file_hash(content):
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()
