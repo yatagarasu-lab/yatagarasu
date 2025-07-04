@@ -1,28 +1,19 @@
-import os
-import hashlib
 import dropbox
+import hashlib
+import os
 
-# Dropbox APIアクセストークン（.envから読み込み）
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(ACCESS_TOKEN)
 
-# 固定フォルダパス（自動作成される公式のアプリ領域）
-FOLDER_PATH = "/Apps/slot-data-analyzer"
-
-def list_files(folder_path=FOLDER_PATH):
-    """Dropboxフォルダ内のファイル一覧を取得"""
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    return dbx.files_list_folder(folder_path).entries
 
 def download_file(path):
-    """指定ファイルの中身を取得（バイナリ）"""
     metadata, res = dbx.files_download(path)
     return res.content
 
-def file_hash(content):
-    """ファイル内容からハッシュを生成（重複検出用）"""
-    return hashlib.sha256(content).hexdigest()
-
 def delete_file(path):
-    """ファイルをDropboxから削除"""
     dbx.files_delete_v2(path)
+
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
