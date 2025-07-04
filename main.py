@@ -1,82 +1,88 @@
 import os
-import tempfile
+import hashlib
+import dropbox
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-import dropbox
-
-# LINE設定（環境変数から）
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-USER_ID = os.getenv("LINE_USER_ID")  # Push通知送信用（必要なら）
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Dropbox設定
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
+from openai import OpenAI
+import tempfile
 
 app = Flask(__name__)
 
+# 環境変数の読み込み
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")  # 固定返信対象
+
+# 初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+openai = OpenAI(api_key=OPENAI_API_KEY)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+
+# Dropbox保存用関数
+def save_to_dropbox(file_bytes, filename):
+    path = f"/スロットデータ/{filename}"
+    dbx.files_upload(file_bytes, path, mode=dropbox.files.WriteMode.overwrite)
+
+# 受信と返信処理
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-    print("[Webhook受信] リクエスト内容:", body)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("Invalid signature. Check channel secret and access token.")
         abort(400)
 
     return "OK"
 
+# メッセージ受信ハンドラー
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     user_text = event.message.text
-    print("[テキスト受信]", user_text)
+
+    # GPTへ問い合わせ
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": user_text}],
+        )
+        reply = response.choices[0].message.content.strip()
+    except Exception as e:
+        reply = f"エラーが発生しました: {e}"
 
     # Dropbox保存
-    file_path = os.path.join(tempfile.gettempdir(), "received_text.txt")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(user_text)
+    filename = f"text_{event.timestamp}.txt"
+    save_to_dropbox(user_text.encode("utf-8"), filename)
 
-    dropbox_path = f"{DROPBOX_FOLDER}/texts/{event.timestamp}.txt"
-    with open(file_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+    # LINE返信
+    line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
 
-    print(f"[Dropboxアップロード] {dropbox_path}")
-    reply_message = "ありがとうございます"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
-
+# 画像メッセージ受信ハンドラー
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    print("[画像受信] メッセージID:", event.message.id)
-
+def handle_image(event):
     message_content = line_bot_api.get_message_content(event.message.id)
-    temp_path = os.path.join(tempfile.gettempdir(), f"{event.message.id}.jpg")
-    
-    with open(temp_path, "wb") as f:
+
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
         for chunk in message_content.iter_content():
-            f.write(chunk)
+            tf.write(chunk)
+        tf.seek(0)
+        image_bytes = tf.read()
 
-    print(f"[画像保存] {temp_path}")
+    # Dropbox保存
+    filename = f"image_{event.timestamp}.jpg"
+    save_to_dropbox(image_bytes, filename)
 
-    # Dropboxへアップロード
-    dropbox_path = f"{DROPBOX_FOLDER}/images/{event.message.id}.jpg"
-    with open(temp_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
-    
-    print(f"[Dropboxアップロード] {dropbox_path}")
-    
-    # GPTで分析などの処理（ここに追加可能）
-    print("[GPT処理] 処理ロジックはここに追加できます")
+    # GPTへ画像要約（省略可）
 
-    reply_message = "ありがとうございます"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_message))
+    # LINE返信
+    line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
 
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
