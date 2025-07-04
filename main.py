@@ -1,121 +1,104 @@
-import os
-import hashlib
-import json
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from dotenv import load_dotenv
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+import os
 import dropbox
-import openai
+import hashlib
+from openai import OpenAI
+from dotenv import load_dotenv
 
-# 環境変数の読み込み
 load_dotenv()
 
-# Flask アプリ
-app = Flask(__name__)
+# LINE設定
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
-# LINE API 初期化
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Dropbox 初期化
+# Dropbox設定
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
 
-# OpenAI APIキー
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ユーザーID（Push通知用）
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# ファイルのハッシュ値を生成（重複判定用）
+# Flaskアプリ
+app = Flask(__name__)
+
+# GPTクライアント
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+    return hashlib.sha256(content).hexdigest()
 
-# Dropboxファイル一覧取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+def save_to_dropbox(file_path, content):
+    dbx.files_upload(content, file_path, mode=dropbox.files.WriteMode.overwrite)
 
-# ファイルをダウンロード
+def list_files(folder_path):
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
+
 def download_file(path):
     _, res = dbx.files_download(path)
-    return res.content.decode("utf-8", errors="ignore")
+    return res.content
 
-# GPTで要約・重複チェック処理
-def analyze_and_deduplicate(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    hash_map = {}
-    report = []
+def is_duplicate(new_content):
+    new_hash = file_hash(new_content)
+    for file in list_files(DROPBOX_FOLDER):
+        existing = download_file(file.path_display)
+        if file_hash(existing) == new_hash:
+            return True, file.name
+    return False, None
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
+def analyze_file(content):
+    response = openai_client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "画像またはテキストの内容をスロットイベントデータとして要約してください"},
+            {"role": "user", "content": content.decode("utf-8", errors="ignore")}
+        ]
+    )
+    return response.choices[0].message.content.strip()
 
-        if hash_value in hash_map:
-            dbx.files_delete_v2(path)
-            report.append(f"❌ 重複削除: {os.path.basename(path)}")
-        else:
-            hash_map[hash_value] = path
-            try:
-                gpt_response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": "これはDropboxに保存されたスロットに関する情報です。内容を要約し、重要なポイントを抽出してください。"},
-                        {"role": "user", "content": content}
-                    ]
-                )
-                summary = gpt_response['choices'][0]['message']['content']
-                report.append(f"✅ {os.path.basename(path)}\n{summary}")
-            except Exception as e:
-                report.append(f"⚠️ {os.path.basename(path)}: GPT解析失敗 ({e})")
-
-    return "\n\n".join(report)
-
-# LINE通知送信
-def send_line_message(text):
-    line_bot_api.push_message(USER_ID, TextSendMessage(text=text))
-
-# Webhookエンドポイント
-@app.route("/webhook", methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-    return 'OK'
 
-# ユーザーがLINEに送ったメッセージ処理（任意）
+    return "OK"
+
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    text = event.message.text.strip().lower()
-    if text == "解析":
-        result = analyze_and_deduplicate()
-        send_line_message(f"📊 最新解析結果:\n\n{result}")
+def handle_text_message(event):
+    text = event.message.text.encode("utf-8")
+    file_path = f"{DROPBOX_FOLDER}/{event.timestamp}.txt"
+
+    duplicate, existing = is_duplicate(text)
+    if not duplicate:
+        save_to_dropbox(file_path, text)
+        summary = analyze_file(text)
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"要約:\n{summary}"))
     else:
-        send_line_message("ありがとうございます")
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複ファイルのためスキップしました"))
 
-# Dropbox webhookトリガー（ファイル追加時用）
-@app.route("/dropbox_webhook", methods=["POST"])
-def dropbox_webhook():
-    result = analyze_and_deduplicate()
-    send_line_message(f"📥 Dropboxに新ファイル\n\n{result}")
-    return "OK", 200
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
+    image_data = b"".join(chunk for chunk in message_content.iter_content())
 
-# webhook検証GET
-@app.route("/dropbox_webhook", methods=["GET"])
-def dropbox_verify():
-    challenge = request.args.get("challenge")
-    return challenge, 200
+    file_path = f"{DROPBOX_FOLDER}/{event.timestamp}.jpg"
 
-# Render用
-@app.route("/")
-def index():
-    return "Slot Data Analyzer is running."
+    duplicate, existing = is_duplicate(image_data)
+    if not duplicate:
+        save_to_dropbox(file_path, image_data)
+        summary = analyze_file(image_data)
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"画像解析結果:\n{summary}"))
+    else:
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複画像のためスキップしました"))
 
 if __name__ == "__main__":
     app.run()
