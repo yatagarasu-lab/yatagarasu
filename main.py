@@ -28,20 +28,25 @@ app = Flask(__name__)
 # GPTクライアント
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# SHA256で内容のハッシュを取る
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
+# Dropboxに保存
 def save_to_dropbox(file_path, content):
     dbx.files_upload(content, file_path, mode=dropbox.files.WriteMode.overwrite)
 
+# Dropbox内のファイル一覧取得
 def list_files(folder_path):
     result = dbx.files_list_folder(folder_path)
     return result.entries
 
+# Dropboxからファイルダウンロード
 def download_file(path):
     _, res = dbx.files_download(path)
     return res.content
 
+# 重複チェック
 def is_duplicate(new_content):
     new_hash = file_hash(new_content)
     for file in list_files(DROPBOX_FOLDER):
@@ -50,6 +55,7 @@ def is_duplicate(new_content):
             return True, file.name
     return False, None
 
+# OpenAIによる内容の要約
 def analyze_file(content):
     response = openai_client.chat.completions.create(
         model="gpt-4",
@@ -60,6 +66,7 @@ def analyze_file(content):
     )
     return response.choices[0].message.content.strip()
 
+# Webhookのルート（LINE BOT連携）
 @app.route("/webhook", methods=["POST"])
 def webhook():
     signature = request.headers["X-Line-Signature"]
@@ -72,6 +79,7 @@ def webhook():
 
     return "OK"
 
+# テキストメッセージ処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     text = event.message.text.encode("utf-8")
@@ -85,6 +93,7 @@ def handle_text_message(event):
     else:
         line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複ファイルのためスキップしました"))
 
+# 画像メッセージ処理
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     message_content = line_bot_api.get_message_content(event.message.id)
@@ -99,6 +108,11 @@ def handle_image_message(event):
         line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"画像解析結果:\n{summary}"))
     else:
         line_bot_api.push_message(LINE_USER_ID, TextMessage(text="重複画像のためスキップしました"))
+
+# トップページ確認用ルート（Render確認用）
+@app.route("/", methods=["GET"])
+def root():
+    return "LINE BOT is running!"
 
 if __name__ == "__main__":
     app.run()
