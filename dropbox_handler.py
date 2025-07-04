@@ -1,32 +1,52 @@
 import dropbox
-import os
 import hashlib
+import os
+import io
 
-DROPBOX_ACCESS_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
+# Dropbox アクセストークン（環境変数から取得）
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-def upload_file(path, binary_content):
-    """Dropboxにバイナリファイルをアップロード"""
-    dbx.files_upload(binary_content, path, mode=dropbox.files.WriteMode("overwrite"))
 
-def upload_text(path, text):
-    """Dropboxにテキストファイルをアップロード"""
-    dbx.files_upload(text.encode("utf-8"), path, mode=dropbox.files.WriteMode("overwrite"))
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    """Dropbox内の指定フォルダにあるファイル一覧を取得"""
+    try:
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except Exception as e:
+        print(f"❌ Dropboxファイル一覧取得エラー: {e}")
+        return []
 
-def list_files(folder_path):
-    """指定フォルダ内のファイル一覧取得"""
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
 
-def download_file(path):
-    """Dropboxからファイルをダウンロード"""
-    _, res = dbx.files_download(path)
-    return res.content
+def download_file(path: str) -> bytes:
+    """Dropboxからファイルをダウンロード（バイナリで返す）"""
+    try:
+        metadata, res = dbx.files_download(path)
+        return res.content
+    except Exception as e:
+        print(f"❌ Dropboxファイルダウンロードエラー（{path}）: {e}")
+        return b""
 
-def file_hash(content):
-    """バイナリコンテンツのハッシュ値を取得"""
-    return hashlib.md5(content).hexdigest()
 
-def delete_file(path):
-    """Dropboxのファイルを削除"""
-    dbx.files_delete_v2(path)
+def file_hash(content: bytes) -> str:
+    """ファイルのSHA-256ハッシュ値を計算"""
+    return hashlib.sha256(content).hexdigest()
+
+
+def delete_file(path: str) -> None:
+    """Dropbox上のファイルを削除"""
+    try:
+        dbx.files_delete_v2(path)
+        print(f"🗑️ 削除完了: {path}")
+    except Exception as e:
+        print(f"⚠️ ファイル削除失敗（{path}）: {e}")
+
+
+def upload_file(file_path: str, dropbox_path: str) -> None:
+    """ローカルファイルをDropboxにアップロード"""
+    try:
+        with open(file_path, "rb") as f:
+            dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        print(f"✅ アップロード完了: {file_path} → {dropbox_path}")
+    except Exception as e:
+        print(f"❌ アップロード失敗（{file_path}）: {e}")
