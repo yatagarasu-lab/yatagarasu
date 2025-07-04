@@ -1,34 +1,41 @@
-import zipfile
-import io
-from openai import OpenAI
 import os
+import io
+import zipfile
+import openai
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_bytes):
-    """
-    ZIPファイルの内容を抽出して、各ファイルをGPTで解析し、結果を1つのテキストとして返す。
-    """
+def analyze_zip_content(zip_binary):
+    """ZIPファイルの中身を展開し、各ファイルをGPTで解析して結果をまとめる"""
+    results = []
+
     try:
-        result = []
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_file:
-            for file_name in zip_file.namelist():
-                if file_name.endswith((".txt", ".csv", ".json")):
-                    with zip_file.open(file_name) as f:
-                        content = f.read().decode('utf-8', errors='ignore')
+        with zipfile.ZipFile(io.BytesIO(zip_binary)) as zipf:
+            for name in zipf.namelist():
+                if name.endswith("/"):
+                    continue  # ディレクトリはスキップ
+                content = zipf.read(name).decode("utf-8", errors="ignore")
+                summary = gpt_summarize(name, content)
+                results.append(f"📝 {name} の解析結果:\n{summary}\n")
 
-                    response = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": "以下のデータを簡潔に要約し、重要な点を抽出してください。"},
-                            {"role": "user", "content": content[:3000]}
-                        ],
-                        max_tokens=1000,
-                        temperature=0.4,
-                    )
-                    result.append(f"🔹【{file_name}】\n{response.choices[0].message.content.strip()}\n")
-
-        return "\n\n".join(result) if result else "⚠️ ZIP内に解析可能なファイルが見つかりませんでした。"
+        return "\n\n".join(results) if results else "⚠️ ZIPファイル内に解析可能なファイルがありませんでした。"
 
     except Exception as e:
-        return f"❌ ZIP解析中にエラーが発生しました: {str(e)}"
+        return f"❌ ZIP解析エラー: {e}"
+
+def gpt_summarize(filename, content):
+    """GPTにファイル内容の要約・解析を依頼"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "あなたはデータ分析に長けたアシスタントです。"},
+                {"role": "user", "content": f"以下のファイル「{filename}」の内容を読み取り、要点・傾向・異常点などを簡潔にまとめてください。\n\n{content}"}
+            ],
+            temperature=0.3,
+            max_tokens=1000,
+        )
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        return f"⚠️ GPT解析エラー: {e}"
