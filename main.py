@@ -1,88 +1,86 @@
 import os
 import hashlib
 import dropbox
-from flask import Flask, request, abort
+import openai
+import requests
+from flask import Flask, request
+from dotenv import load_dotenv
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
-from openai import OpenAI
-import tempfile
+from linebot.models import TextSendMessage
+
+# 環境変数の読み込み
+load_dotenv()
+
+# LINE
+line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+# Dropbox
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
+    app_key=os.getenv("DROPBOX_APP_KEY"),
+    app_secret=os.getenv("DROPBOX_APP_SECRET")
+)
+
+# OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = Flask(__name__)
 
-# 環境変数の読み込み
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")  # 固定返信対象
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
 
-# 初期化
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai = OpenAI(api_key=OPENAI_API_KEY)
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+def download_file(path):
+    metadata, res = dbx.files_download(path)
+    return res.content
 
-# Dropbox保存用関数
-def save_to_dropbox(file_bytes, filename):
-    path = f"/スロットデータ/{filename}"
-    dbx.files_upload(file_bytes, path, mode=dropbox.files.WriteMode.overwrite)
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-# 受信と返信処理
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers["X-Line-Signature"]
-    body = request.get_data(as_text=True)
+def summarize_content(content):
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "あなたはファイル要約のアシスタントです。"},
+            {"role": "user", "content": f"次の内容を要約してください：\n\n{content[:4000]}"}
+        ],
+        max_tokens=500
+    )
+    return response.choices[0].message.content.strip()
 
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+        if hash_value in hash_map:
+            dbx.files_delete_v2(path)  # 重複ファイルを削除
+        else:
+            hash_map[hash_value] = path
 
-    return "OK"
-
-# メッセージ受信ハンドラー
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    user_text = event.message.text
-
-    # GPTへ問い合わせ
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": user_text}],
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    for entry in data.get("list_folder", {}).get("entries", []):
+        if entry[0] != "file":
+            continue
+        file_path = entry[1]["path_display"]
+        content = download_file(file_path)
+        summary = summarize_content(content.decode("utf-8", errors="ignore"))
+        find_duplicates()  # 重複削除実行
+        line_bot_api.push_message(
+            LINE_USER_ID,
+            TextSendMessage(text=f"📁 {file_path} の解析結果:\n\n{summary}")
         )
-        reply = response.choices[0].message.content.strip()
-    except Exception as e:
-        reply = f"エラーが発生しました: {e}"
+    return "OK", 200
 
-    # Dropbox保存
-    filename = f"text_{event.timestamp}.txt"
-    save_to_dropbox(user_text.encode("utf-8"), filename)
-
-    # LINE返信
-    line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
-
-# 画像メッセージ受信ハンドラー
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-
-    with tempfile.NamedTemporaryFile(delete=False) as tf:
-        for chunk in message_content.iter_content():
-            tf.write(chunk)
-        tf.seek(0)
-        image_bytes = tf.read()
-
-    # Dropbox保存
-    filename = f"image_{event.timestamp}.jpg"
-    save_to_dropbox(image_bytes, filename)
-
-    # GPTへ画像要約（省略可）
-
-    # LINE返信
-    line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
+@app.route("/", methods=["GET"])
+def health_check():
+    return "Webhook is running!", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
