@@ -1,113 +1,99 @@
 import os
 import hashlib
-from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.messaging import (
-    MessagingApiClient,
-    Configuration,
-    ApiClient,
-    ReplyMessageRequest,
-    TextMessage,
-    PushMessageRequest
-)
-from linebot.v3.webhooks import (
-    MessageEvent,
-    TextMessageContent,
-    ImageMessageContent
-)
 import dropbox
+from flask import Flask, request
+from dotenv import load_dotenv
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+import openai
 
-# === 設定 ===
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+# .envの読み込み
+load_dotenv()
+
+# 環境変数の取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")  # LINE通知先
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# === Flask 初期化 ===
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
+PORT = int(os.getenv("PORT", 10000))
+
+# LINE Bot の初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Dropbox の初期化
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
+
+# Flask アプリケーションの初期化
 app = Flask(__name__)
 
-# === LINE初期化 ===
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-line_bot_api = MessagingApiClient(configuration)
+# ファイルの SHA-256 ハッシュ計算
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
 
-# === Dropbox 初期化 ===
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+# Dropbox からファイル一覧を取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-# === ファイル保存関数 ===
-def save_to_dropbox(filename, data):
-    path = f"/Apps/slot-data-analyzer/{filename}"
-    dbx.files_upload(data, path, mode=dropbox.files.WriteMode("overwrite"))
+# ファイルの内容を取得
+def download_file(path):
+    metadata, res = dbx.files_download(path)
+    return res.content
 
-# === 重複ファイルチェック ===
-def file_hash(data):
-    return hashlib.md5(data).hexdigest()
-
+# 重複ファイルの検出と削除（オプション）
 def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    files = dbx.files_list_folder(folder_path).entries
+    files = list_files(folder_path)
     hash_map = {}
 
     for file in files:
         path = file.path_display
-        _, res = dbx.files_download(path)
-        content = res.content
+        content = download_file(path)
         hash_value = file_hash(content)
 
         if hash_value in hash_map:
-            dbx.files_delete_v2(path)
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            # dbx.files_delete_v2(path)  # ← 本当に削除するならアンコメント
         else:
             hash_map[hash_value] = path
 
-# === GPT処理（ダミー） ===
-def analyze_file_with_gpt(filename, content):
-    # ここでGPTによる解析ロジックを挿入する
-    return f"{filename} を解析しました。"
-
-# === Webhook エンドポイント ===
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    signature = request.headers.get("X-Line-Signature")
+# LINE Webhookエンドポイント
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        abort(400)
-    return "OK"
+    except InvalidSignatureError:
+        return "Invalid signature", 400
 
-# === イベントハンドラ ===
-@handler.add(MessageEvent)
+    return "OK", 200
+
+# メッセージ受信時の処理
+@handler.add(event=__import__('linebot.models').linebot.models.events.MessageEvent)
 def handle_message(event):
-    message = event.message
+    if event.source.user_id != LINE_USER_ID:
+        return  # 応答しない（認証）
 
-    if isinstance(message, TextMessageContent):
-        text = message.text.encode("utf-8")
-        filename = f"text_{event.timestamp}.txt"
-        save_to_dropbox(filename, text)
-        find_duplicates()
+    # 確認用のシンプルな返信
+    message_text = event.message.text
+    reply_text = f"受信しました：{message_text}"
 
-        result = analyze_file_with_gpt(filename, text)
-
-    elif isinstance(message, ImageMessageContent):
-        message_content = line_bot_api.get_message_content(message.id)
-        data = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
-        filename = f"image_{event.timestamp}.jpg"
-        save_to_dropbox(filename, data)
-        find_duplicates()
-
-        result = analyze_file_with_gpt(filename, data)
-
-    else:
-        result = "対応していないファイル形式です。"
-
-    # LINEへ返信
-    line_bot_api.push_message(
-        PushMessageRequest(
-            to=USER_ID,
-            messages=[TextMessage(text="ありがとうございます")]
-        )
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
     )
 
-# === Flaskアプリ起動 ===
+# アプリの起動
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
