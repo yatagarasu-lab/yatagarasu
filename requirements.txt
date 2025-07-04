@@ -3,3 +3,4 @@ gunicorn
 line-bot-sdk==3.10.0
 dropbox==11.36.2
 openai==1.30.1
+python-dotenv==1.0.1
