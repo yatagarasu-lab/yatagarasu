@@ -7,15 +7,14 @@ import os
 import hashlib
 import dropbox
 from datetime import datetime
-from werkzeug.utils import secure_filename
+from openai import OpenAI
 
-# LINE APIキー
+# 環境変数取得
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
-
-# Dropboxアクセストークン
 DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 DROPBOX_SAVE_PATH = "/Apps/slot-data-analyzer"
 
 # 初期化
@@ -23,14 +22,9 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# ファイル保存関数
-def save_to_dropbox(filename, content):
-    path = f"{DROPBOX_SAVE_PATH}/{filename}"
-    dbx.files_upload(content, path, mode=dropbox.files.WriteMode("overwrite"))
-    return path
-
-# 重複ファイル検出
+# ハッシュで重複確認
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
@@ -43,7 +37,28 @@ def is_duplicate(content):
             return True
     return False
 
-# 画像保存
+# Dropboxに保存
+def save_to_dropbox(filename, content):
+    path = f"{DROPBOX_SAVE_PATH}/{filename}"
+    dbx.files_upload(content, path, mode=dropbox.files.WriteMode("overwrite"))
+    return path
+
+# GPT要約
+def gpt_summarize(content):
+    try:
+        result = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "この内容を簡潔に要約してください。"},
+                {"role": "user", "content": content.decode("utf-8", errors="ignore")},
+            ],
+            max_tokens=300
+        )
+        return result.choices[0].message.content.strip()
+    except Exception as e:
+        return f"GPT処理エラー: {str(e)}"
+
+# 画像処理
 def handle_image(event):
     message_id = event.message.id
     content = line_bot_api.get_message_content(message_id)
@@ -56,22 +71,27 @@ def handle_image(event):
     filename = f"image_{timestamp}.jpg"
     save_to_dropbox(filename, image_data)
 
-    # LINE通知（GPT処理は後ほど）
     line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"画像をDropboxに保存しました: {filename}"))
     return "保存完了"
 
-# テキスト保存
+# テキスト処理
 def handle_text(event):
     text = event.message.text
-    filename = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     content = text.encode('utf-8')
 
     if is_duplicate(content):
         return "重複テキストとしてスキップされました。"
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"text_{timestamp}.txt"
     save_to_dropbox(filename, content)
-    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"テキストをDropboxに保存しました: {filename}"))
-    return "保存完了"
+
+    # GPTで要約
+    summary = gpt_summarize(content)
+    message = f"📝テキスト保存: {filename}\n\n🧠要約:\n{summary}"
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+
+    return "保存＆要約完了"
 
 # LINE Webhook
 @app.route("/callback", methods=["POST"])
@@ -93,7 +113,7 @@ def handle_text_message(event):
 def handle_image_message(event):
     handle_image(event)
 
-# Dropbox Webhook（超重要：challenge返却）
+# Dropbox Webhook確認
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -103,7 +123,7 @@ def webhook():
         return "OK", 200
     return "Method Not Allowed", 405
 
-# 動作確認用
+# 動作確認
 @app.route("/", methods=["GET"])
 def home():
-    return "LINE & Dropbox Bot 動作中", 200
+    return "LINE & Dropbox BOT + GPT連携 稼働中", 200
