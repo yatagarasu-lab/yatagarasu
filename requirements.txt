@@ -1,8 +1,8 @@
-flask
-gunicorn
-openai
-python-dotenv
-requests
-dropbox
-line-bot-sdk==3.4.0
-Pillow
+flask==3.0.0
+gunicorn==21.2.0
+
+line-bot-sdk==3.8.0
+dropbox==11.36.2
+openai==1.30.1
+
+python-dotenv==1.0.1  # 環境変数の読み込みに使用（必要であれば）
