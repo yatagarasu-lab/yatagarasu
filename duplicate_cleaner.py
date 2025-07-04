@@ -1,13 +1,18 @@
 from dropbox_handler import list_files, download_file, file_hash, delete_file
 
 def find_and_remove_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    """Dropboxフォルダ内の重複ファイルを検出して削除"""
+    """重複ファイルを検出し、Dropboxから削除する"""
     files = list_files(folder_path)
     hash_map = {}
 
     for file in files:
         path = file.path_display
         content = download_file(path)
+
+        if not content:
+            print(f"⚠️ ダウンロード失敗（スキップ）: {path}")
+            continue
+
         hash_value = file_hash(content)
 
         if hash_value in hash_map:
@@ -15,3 +20,6 @@ def find_and_remove_duplicates(folder_path="/Apps/slot-data-analyzer"):
             delete_file(path)
         else:
             hash_map[hash_value] = path
+
+if __name__ == "__main__":
+    find_and_remove_duplicates()
