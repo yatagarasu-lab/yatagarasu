@@ -1,41 +1,46 @@
-import os
-import io
-import zipfile
 import openai
+import zipfile
+import io
+import os
 
+# OpenAI APIキーを環境変数から読み込む
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_binary):
-    """ZIPファイルの中身を展開し、各ファイルをGPTで解析して結果をまとめる"""
-    results = []
-
+def analyze_zip_content(zip_data: bytes) -> str:
+    """
+    ZIPファイルの内容を展開し、含まれるテキストをGPTに送って要約する
+    """
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_binary)) as zipf:
-            for name in zipf.namelist():
-                if name.endswith("/"):
-                    continue  # ディレクトリはスキップ
-                content = zipf.read(name).decode("utf-8", errors="ignore")
-                summary = gpt_summarize(name, content)
-                results.append(f"📝 {name} の解析結果:\n{summary}\n")
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            result = ""
+            for file_info in zf.infolist():
+                if file_info.filename.endswith(".txt") or file_info.filename.endswith(".csv"):
+                    with zf.open(file_info) as file:
+                        content = file.read().decode("utf-8", errors="ignore")
+                        print(f"🔍 {file_info.filename} をGPTで解析中...")
 
-        return "\n\n".join(results) if results else "⚠️ ZIPファイル内に解析可能なファイルがありませんでした。"
+                        prompt = f"""以下のファイル「{file_info.filename}」の内容を要約・分析してください。
+不要なデータは省略して重要な情報を抽出してください。日本語でお願いします。
 
+内容:
+{content[:2000]}"""  # 文字数制限のため先頭だけ送信
+
+                        response = openai.ChatCompletion.create(
+                            model="gpt-4-1106-preview",
+                            messages=[
+                                {"role": "system", "content": "あなたはDropbox内のデータを解析するプロです。"},
+                                {"role": "user", "content": prompt}
+                            ],
+                            max_tokens=2000,
+                            temperature=0.7
+                        )
+
+                        summary = response['choices'][0]['message']['content']
+                        result += f"\n\n【{file_info.filename}】\n{summary}"
+
+            return result.strip() or "⚠️ ZIPファイル内に解析対象ファイルがありませんでした。"
+
+    except zipfile.BadZipFile:
+        return "⚠️ ZIPファイルが壊れているか、読み込みできませんでした。"
     except Exception as e:
-        return f"❌ ZIP解析エラー: {e}"
-
-def gpt_summarize(filename, content):
-    """GPTにファイル内容の要約・解析を依頼"""
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "あなたはデータ分析に長けたアシスタントです。"},
-                {"role": "user", "content": f"以下のファイル「{filename}」の内容を読み取り、要点・傾向・異常点などを簡潔にまとめてください。\n\n{content}"}
-            ],
-            temperature=0.3,
-            max_tokens=1000,
-        )
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        return f"⚠️ GPT解析エラー: {e}"
+        return f"⚠️ GPT解析中にエラーが発生しました: {e}"
