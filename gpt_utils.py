@@ -1,22 +1,22 @@
 import openai
 import os
 
-# OpenAI APIキー
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# OpenAI APIキーを環境変数から取得
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
-def process_with_gpt(text):
-    """テキストをGPTで要約または整形する（今はLINE返信は固定）"""
+# GPTでテキストを処理する関数
+def process_with_gpt(user_input):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたはスロットデータを解析する専門AIです。"},
-                {"role": "user", "content": text}
+                {"role": "system", "content": "あなたはDropboxに保存されたスロット関連データを解析・要約するAIアシスタントです。"},
+                {"role": "user", "content": user_input}
             ],
-            temperature=0.3,
-            max_tokens=800
+            max_tokens=1000,
+            temperature=0.7,
         )
-        return response.choices[0].message["content"]
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"❌ GPT処理失敗: {e}")
-        return "GPT処理に失敗しました。"
+        return f"GPT処理中にエラーが発生しました: {e}"
