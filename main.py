@@ -1,19 +1,27 @@
-from flask import Flask, request, Response
-from analyze_and_notify import analyze_new_files, find_and_remove_duplicates
+from PIL import Image
+from io import BytesIO
 
-app = Flask(__name__)
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    user_id = event.source.user_id
+    message_id = event.message.id
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    # DropboxからのWebhook通知受信時に実行される
-    if request.method == "GET":
-        return request.args.get("challenge")
+    # 画像取得
+    image_content = line_bot_api.get_message_content(message_id).content
+    original_bytes = BytesIO(image_content)
 
-    if request.method == "POST":
-        # 1. 重複削除
-        find_and_remove_duplicates()
-        # 2. 新しいファイルの解析＋通知
-        analyze_new_files()
-        return Response("OK", status=200)
+    # Pillowで開いて圧縮
+    image = Image.open(original_bytes)
+    compressed = BytesIO()
+    image.convert("RGB").save(compressed, format="JPEG", quality=85)
+    compressed.seek(0)
 
-    return Response("Method Not Allowed", status=405)
+    # Dropbox保存
+    filename = f"{user_id}_{message_id}.jpg"
+    dbx.files_upload(compressed.read(), f"/スロットデータ/{filename}")
+
+    # 応答
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextMessage(text="ありがとうございます")
+    )
