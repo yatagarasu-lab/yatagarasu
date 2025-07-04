@@ -3,3 +3,4 @@ line-bot-sdk==3.4.0
 python-dotenv
 dropbox
 gunicorn
+openai
