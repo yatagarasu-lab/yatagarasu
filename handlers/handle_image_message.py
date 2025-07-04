@@ -1,42 +1,42 @@
-from linebot.models import ImageMessage
-from linebot.models.events import MessageEvent
-from linebot.exceptions import LineBotApiError
-from io import BytesIO
-import zipfile
-import time
+# handle_image_message.py
 
-from dropbox_handler import upload_file
-from gpt_handler import analyze_zip_content
+from linebot.models import ImageMessage, TextSendMessage
+from linebot import LineBotApi
+from dropbox_handler import upload_to_dropbox
 
-def handle_image_message(event, line_bot_api, USER_ID):
-    """画像メッセージを受信し、DropboxにZIP形式で保存 → GPT解析 → LINE通知"""
+import tempfile
+import os
+import requests
+
+def handle_image_message(event, line_bot_api: LineBotApi):
+    """LINEからの画像を一時保存しDropboxへアップロードする"""
     try:
-        # 画像を取得
-        message_id = event.message.id
-        message_content = line_bot_api.get_message_content(message_id)
-        image_data = b''.join(chunk for chunk in message_content.iter_content(chunk_size=1024))
+        # 画像データを一時ファイルに保存
+        message_content = line_bot_api.get_message_content(event.message.id)
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            for chunk in message_content.iter_content():
+                tf.write(chunk)
+            temp_path = tf.name
 
-        # 一時ZIPファイル作成
-        timestamp = int(time.time())
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.writestr(f"image_{timestamp}.jpg", image_data)
+        # ファイル名をユーザーIDとメッセージIDから作成
+        file_name = f"{event.source.user_id}_{event.message.id}.jpg"
+        dropbox_path = f"/Apps/slot-data-analyzer/images/{file_name}"
 
-        zip_bytes = zip_buffer.getvalue()
+        # Dropboxへアップロード
+        upload_to_dropbox(temp_path, dropbox_path)
 
-        # Dropboxにアップロード
-        dropbox_path = "/Apps/slot-data-analyzer/latest_upload.zip"
-        upload_file(zip_bytes, dropbox_path)
+        # ユーザーに返信
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="📷 画像をDropboxに保存しました！")
+        )
 
-        # GPTでZIP解析
-        result = analyze_zip_content(zip_bytes)
+        # 一時ファイルを削除
+        os.remove(temp_path)
 
-        # LINEへ送信（文字数制限あり）
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=result[:4000]))
-
-    except LineBotApiError as e:
-        print(f"⚠️ LINE APIエラー: {e}")
-        line_bot_api.push_message(USER_ID, TextSendMessage(text="⚠️ LINE画像処理中にエラーが発生しました"))
     except Exception as e:
-        print(f"⚠️ 画像処理エラー: {e}")
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=f"⚠️ 画像処理中にエラーが発生しました: {e}"))
+        print(f"画像処理エラー: {e}")
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=f"⚠️ 画像の保存に失敗しました: {e}")
+        )
