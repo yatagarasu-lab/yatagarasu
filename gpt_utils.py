@@ -1,43 +1,62 @@
+import openai
 import os
 import hashlib
 import dropbox
-import openai
 
-dbx = dropbox.Dropbox(os.environ["DROPBOX_ACCESS_TOKEN"])
-openai.api_key = os.environ["OPENAI_API_KEY"]
+# 環境変数からキー取得
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+openai.api_key = OPENAI_API_KEY
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-def analyze_and_store(content, filename, folder, is_image=False):
-    print(f"解析開始: {filename}")
+# 既読ファイル用のハッシュ記録用セット（オンメモリ簡易版）
+seen_hashes = set()
 
-    # 重複判定
-    hash_val = file_hash(content)
+def file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+def process_with_gpt(text: str) -> str:
+    """送られたテキストをGPTで要約してDropboxに保存、LINE通知も送る"""
     try:
-        existing_files = dbx.files_list_folder(folder).entries
-        for f in existing_files:
-            if isinstance(f, dropbox.files.FileMetadata):
-                meta, res = dbx.files_download(f.path_display)
-                if file_hash(res.content) == hash_val:
-                    print(f"重複ファイル: {f.name} → スキップ")
-                    return
-    except dropbox.exceptions.ApiError:
-        dbx.files_create_folder_v2(folder)
-
-    # GPT解析
-    if is_image:
-        result = f"画像 {filename} を受信しました（解析準備中）"
-    else:
-        response = openai.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたは優秀な要約者です。"},
-                {"role": "user", "content": content}
-            ]
+                {"role": "system", "content": "スロットのデータを解析して要点を簡潔にまとめてください。"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=500
         )
-        result = response.choices[0].message.content
+        summary = response.choices[0].message.content.strip()
 
-    summary_path = f"{folder}/解析_{filename}.txt"
-    dbx.files_upload(result.encode(), summary_path)
-    print(f"保存完了: {summary_path}")
+        # Dropboxに保存（要約結果）
+        filename = f"/スロットデータ/summary_{hashlib.md5(text.encode()).hexdigest()}.txt"
+        dbx.files_upload(summary.encode(), filename, mode=dropbox.files.WriteMode.overwrite)
+
+        # LINEに通知
+        send_line_push_message("GPT解析結果：\n" + summary)
+
+        return summary
+
+    except Exception as e:
+        error_msg = f"GPT処理でエラーが発生しました: {str(e)}"
+        send_line_push_message(error_msg)
+        return error_msg
+
+def send_line_push_message(message: str):
+    """LINEのPush通知"""
+    import requests
+
+    LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {"type": "text", "text": message}
+        ]
+    }
+    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
