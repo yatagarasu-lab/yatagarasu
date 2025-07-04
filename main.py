@@ -1,122 +1,113 @@
-from flask import Flask, request, abort
+from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
-import os
-import dropbox
-import hashlib
-from datetime import datetime
+from linebot.models import MessageEvent, TextMessage
 from openai import OpenAI
+import dropbox
+import os
+import hashlib
+import requests
+from PIL import Image
+from io import BytesIO
 from dotenv import load_dotenv
 
+# .envファイルの読み込み
 load_dotenv()
 
-# LINE設定
-line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
-handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-
-# Dropbox設定
+# 各種APIキーなど環境変数から取得
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-BASE_FOLDER = "/Apps/slot-data-analyzer"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_USER_ID = os.getenv("LINE_USER_ID")  # ユーザーID固定
 
-# GPT設定
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Flask
+# Flaskアプリ初期化
 app = Flask(__name__)
 
+# LINE API初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Dropbox API初期化
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+
+# OpenAI SDK v1.30.1対応クライアント初期化
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ファイルのハッシュ取得（重複チェック用）
 def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+    return hashlib.md5(content).hexdigest()
 
-def save_to_dropbox(file_path, content):
-    dbx.files_upload(content, file_path, mode=dropbox.files.WriteMode.overwrite)
+# Dropboxからファイル一覧取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-def list_files(folder_path):
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
-
+# Dropboxからファイルをダウンロード
 def download_file(path):
     _, res = dbx.files_download(path)
     return res.content
 
-def is_duplicate(new_content, folder_path):
-    new_hash = file_hash(new_content)
-    try:
-        for file in list_files(folder_path):
-            existing = download_file(file.path_display)
-            if file_hash(existing) == new_hash:
-                return True, file.name
-    except dropbox.exceptions.ApiError:
-        pass  # フォルダが存在しないなど
-    return False, None
+# 重複ファイルチェックと削除（同一内容のファイルは削除）
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
 
-def analyze_file(content):
-    response = openai_client.chat.completions.create(
-        model="gpt-4",
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+
+        if hash_value in hash_map:
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            dbx.files_delete_v2(path)
+        else:
+            hash_map[hash_value] = path
+
+# GPTで内容要約（画像やテキストに応じて応答）
+def analyze_with_gpt(text):
+    response = client.chat.completions.create(
+        model="gpt-4o",
         messages=[
-            {"role": "system", "content": "これはスロット・ロト・プログラムなどの解析対象データです。要約とカテゴリ分類を行ってください。"},
-            {"role": "user", "content": content.decode("utf-8", errors="ignore")}
-        ]
+            {"role": "system", "content": "あなたはLINEに届いた画像や文章を解析・要約し、スロットに関する情報を整理するアシスタントです。"},
+            {"role": "user", "content": text}
+        ],
+        max_tokens=500
     )
     return response.choices[0].message.content.strip()
 
-def categorize_content(text):
-    text_lower = text.lower()
-    if "ジャグラー" in text or "北斗" in text or "パチスロ" in text:
-        return "スロット"
-    elif "ロト" in text or "ミニロト" in text or "宝くじ" in text:
-        return "ロト"
-    elif "python" in text_lower or "flask" in text_lower or "API" in text:
-        return "プログラム"
-    else:
-        return "その他"
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    signature = request.headers["X-Line-Signature"]
+# LINE Webhookエンドポイント
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    return "OK"
+    except Exception as e:
+        print(f"Error: {e}")
+    return 'OK'
 
+# メッセージ受信時の処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    text = event.message.text
-    content_bytes = text.encode("utf-8")
-    category = categorize_content(text)
-    folder_path = f"{BASE_FOLDER}/{category}"
-    filename = f"{event.timestamp}.txt"
-    dropbox_path = f"{folder_path}/{filename}"
+    user_text = event.message.text
 
-    duplicate, _ = is_duplicate(content_bytes, folder_path)
-    if not duplicate:
-        save_to_dropbox(dropbox_path, content_bytes)
-        summary = analyze_file(content_bytes)
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"[{category}]\n要約:\n{summary}"))
-    else:
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"[{category}]\n重複ファイルのためスキップしました"))
+    # Dropboxへ保存
+    file_name = f"/Apps/slot-data-analyzer/from_line_{event.timestamp}.txt"
+    dbx.files_upload(user_text.encode(), file_name)
 
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-    image_data = b"".join(chunk for chunk in message_content.iter_content())
-    category = "スロット"  # 現時点では画像＝スロット画像前提（後で拡張可）
-    folder_path = f"{BASE_FOLDER}/{category}"
-    filename = f"{event.timestamp}.jpg"
-    dropbox_path = f"{folder_path}/{filename}"
+    # GPTで解析
+    gpt_summary = analyze_with_gpt(user_text)
 
-    duplicate, _ = is_duplicate(image_data, folder_path)
-    if not duplicate:
-        save_to_dropbox(dropbox_path, image_data)
-        summary = analyze_file(image_data)
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"[{category}] 画像解析結果:\n{summary}"))
-    else:
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=f"[{category}]\n重複画像のためスキップしました"))
+    # LINEに送信
+    line_bot_api.push_message(
+        LINE_USER_ID,
+        TextMessage(text=f"📝解析結果:\n{gpt_summary}")
+    )
 
+    # 重複ファイルチェック（解析後）
+    find_duplicates()
+
+# 起動コマンド
 if __name__ == "__main__":
-    app.run()
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
