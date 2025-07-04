@@ -4,3 +4,4 @@ requests
 openai
 dropbox
 gunicorn
+line-bot-sdk
