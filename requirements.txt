@@ -1,6 +1,6 @@
-flask
-line-bot-sdk==3.4.0
-python-dotenv
-dropbox
+Flask
 gunicorn
+line-bot-sdk==3.4.0
+dropbox
 openai
+python-dotenv
