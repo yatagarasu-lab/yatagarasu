@@ -1,15 +1,23 @@
 services:
   - type: web
-    name: slot-gpt-analyzer
+    name: slot-data-analyzer
     env: python
     buildCommand: ""
     startCommand: gunicorn main:app
     envVars:
       - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: your_line_channel_access_token
+        value: ${LINE_CHANNEL_ACCESS_TOKEN}
       - key: LINE_CHANNEL_SECRET
-        value: your_line_channel_secret
+        value: ${LINE_CHANNEL_SECRET}
+      - key: LINE_USER_ID
+        value: ${LINE_USER_ID}
+      - key: DROPBOX_APP_KEY
+        value: ${DROPBOX_APP_KEY}
+      - key: DROPBOX_APP_SECRET
+        value: ${DROPBOX_APP_SECRET}
+      - key: DROPBOX_REFRESH_TOKEN
+        value: ${DROPBOX_REFRESH_TOKEN}
       - key: DROPBOX_ACCESS_TOKEN
-        value: your_dropbox_access_token
+        value: ${DROPBOX_ACCESS_TOKEN}
       - key: OPENAI_API_KEY
-        value: your_openai_api_key
+        value: ${OPENAI_API_KEY}
