@@ -1,49 +1,97 @@
-import os
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-
 import dropbox
-from datetime import datetime
 import hashlib
+import os
+import openai
+import tempfile
 
-# Flaskアプリ初期化
 app = Flask(__name__)
 
-# 環境変数からトークン取得
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# --- 各種APIキーと設定（環境変数に設定してある前提） ---
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"  # 固定ユーザーID
 
-# LINE API初期化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Dropbox API初期化
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-# ファイルの保存と重複チェック
-def save_to_dropbox(text, user_id):
+
+# --- Dropbox ファイル操作 ---
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
+
+def download_file(file_path):
+    _, res = dbx.files_download(file_path)
+    return res.content
+
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
+
+
+# --- 重複ファイル検出＆削除 ---
+def clean_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
+    deleted_files = []
+
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        h = file_hash(content)
+        if h in hash_map:
+            dbx.files_delete_v2(path)
+            deleted_files.append(path)
+        else:
+            hash_map[h] = path
+
+    return deleted_files
+
+
+# --- GPTによるファイル解析 ---
+def analyze_file_with_gpt(file_path):
+    content = download_file(file_path).decode("utf-8", errors="ignore")
+    prompt = f"このデータの内容を要約してください:\n\n{content[:3000]}"
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=500
+    )
+    return response.choices[0].message["content"]
+
+
+# --- Dropbox Webhookエンドポイント ---
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    # Dropbox からの通知処理
     folder_path = "/Apps/slot-data-analyzer"
-    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{user_id}.txt"
-    file_path = f"{folder_path}/{filename}"
-    content = text.encode("utf-8")
+    deleted = clean_duplicates(folder_path)
+    files = list_files(folder_path)
+    messages = []
 
-    # 重複チェック（ハッシュ）
-    hash_value = hashlib.sha256(content).hexdigest()
-    for entry in dbx.files_list_folder(folder_path).entries:
-        if isinstance(entry, dropbox.files.FileMetadata):
-            existing_content = dbx.files_download(entry.path_lower)[1].content
-            if hashlib.sha256(existing_content).hexdigest() == hash_value:
-                print(f"重複データ検出：{filename}")
-                return
+    for file in files:
+        file_path = file.path_display
+        summary = analyze_file_with_gpt(file_path)
+        messages.append(f"📄 {file.name}\n{summary}")
 
-    # 保存
-    dbx.files_upload(content, file_path)
-    print(f"保存完了：{filename}")
+    if deleted:
+        messages.append(f"🧹 重複削除: {len(deleted)}件")
 
-# ✅ ← このルートが必要！
+    final_message = "\n\n".join(messages)
+    if final_message:
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=final_message[:5000]))
+
+    return "OK"
+
+
+# --- LINEメッセージ受信エンドポイント ---
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers["X-Line-Signature"]
@@ -56,26 +104,16 @@ def callback():
 
     return "OK"
 
-# メッセージ処理
+
+# --- LINEメッセージ受信時の処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    user_id = event.source.user_id
+    # 受信テキストをDropboxに保存
     text = event.message.text
+    filename = f"text_{event.timestamp}.txt"
+    dbx.files_upload(text.encode("utf-8"), f"/Apps/slot-data-analyzer/{filename}")
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
 
-    # Dropboxに保存
-    save_to_dropbox(text, user_id)
 
-    # 応答
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text="ありがとうございます")
-    )
-
-# 動作確認用
-@app.route("/", methods=["GET"])
-def hello():
-    return "Hello, Render!"
-
-# 起動（ローカル確認用）
 if __name__ == "__main__":
     app.run()
