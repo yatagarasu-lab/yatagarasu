@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# 環境ファイル
+.env
+
+# JupyterやVSCodeの設定など
+*.ipynb
+.vscode/
+
+# OSごとの不要ファイル
+.DS_Store
+
+# ログファイルや一時ファイル
+*.log
+*.tmp
+
+# Dropboxや個人情報系（セキュリティ）
+dropbox_token.json
+refresh_token.json
