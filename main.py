@@ -1,31 +1,32 @@
-import os
-import hashlib
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+import os
+import requests
+import hashlib
 import dropbox
-from dotenv import load_dotenv
-from gpt_utils import analyze_and_store
+from gpt_utils import process_with_gpt  # 外部ファイルでGPT処理を管理
 
-load_dotenv()
-
+# Flask初期化
 app = Flask(__name__)
 
-# LINE
-line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
-handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+# 環境変数からLINEとDropboxのキーを取得
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
 
-# Dropbox
-dbx = dropbox.Dropbox(os.environ["DROPBOX_ACCESS_TOKEN"])
+# LINE Bot初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-@app.route("/", methods=["GET"])
-def health_check():
-    return "Bot is running."
+# Dropboxクライアント
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
+# LINEのWebhookエンドポイント（POST）
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
 
     try:
@@ -35,35 +36,58 @@ def callback():
 
     return "OK"
 
+# LINEのメッセージ処理
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
+def handle_text_message(event):
     user_id = event.source.user_id
     text = event.message.text
-    print(f"受信: {user_id} → テキスト: {text}")
 
-    filename = f"{event.timestamp}_text.txt"
-    folder = f"/Apps/slot-data-analyzer/{user_id}"
-    path = f"{folder}/{filename}"
+    # Dropboxに保存
+    filename = f"{user_id}_{event.timestamp}.txt"
+    dbx.files_upload(text.encode(), f"/スロットデータ/{filename}")
 
-    dbx.files_upload(text.encode(), path)
-    analyze_and_store(text, filename, folder)
+    # GPTで処理
+    gpt_result = process_with_gpt(text)
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
+    # LINE返信
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextMessage(text="ありがとうございます")  # 固定返信
+    )
 
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
+def handle_image_message(event):
     user_id = event.source.user_id
     message_id = event.message.id
-    print(f"受信: {user_id} → 画像: {message_id}")
 
-    image_content = line_bot_api.get_message_content(message_id)
-    image_data = image_content.content.read()
+    # 画像取得
+    image_content = line_bot_api.get_message_content(message_id).content
+    filename = f"{user_id}_{message_id}.jpg"
 
-    filename = f"{event.timestamp}_image.jpg"
-    folder = f"/Apps/slot-data-analyzer/{user_id}"
-    path = f"{folder}/{filename}"
+    # Dropbox保存
+    dbx.files_upload(image_content, f"/スロットデータ/{filename}")
 
-    dbx.files_upload(image_data, path)
-    analyze_and_store(image_data, filename, folder, is_image=True)
+    # GPTで処理（オプション）
+    # process_with_gpt_image(image_content)
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
+    # 返信
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextMessage(text="ありがとうございます")
+    )
+
+# DropboxのWebhook検証用（GET）
+@app.route("/webhook", methods=["GET", "POST"])
+def dropbox_webhook():
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        return challenge, 200
+
+    if request.method == "POST":
+        # 通知は空応答でもOK（処理は後でpollingでも可能）
+        return "OK", 200
+
+# ルート確認用
+@app.route("/", methods=["GET"])
+def health_check():
+    return "LINE-Dropbox GPT Bot is running", 200
