@@ -1,6 +1,8 @@
 # dropbox_handler.py
 import os
-from dropbox_utils import list_files, download_file, upload_file, find_duplicates
+import zipfile
+import tempfile
+from dropbox_utils import list_files, download_file, upload_file, find_duplicates_and_delete
 from gpt_utils import analyze_file_content
 from line_utils import send_line_message
 
@@ -14,7 +16,7 @@ def process_new_files():
     for file in files:
         file_path = file.path_display
 
-        # processed フォルダはスキップ
+        # processedフォルダはスキップ
         if file_path.startswith(PROCESSED_FOLDER):
             continue
 
@@ -27,26 +29,33 @@ def process_new_files():
         print(f"📤 LINE通知送信中: {file_path}")
         send_line_message(f"📁 新規ファイル: {file_path}\n\n📝 解析結果:\n{analysis_result}")
 
-        # 処理済みに移動
-        new_path = f"{PROCESSED_FOLDER}/{os.path.basename(file_path)}"
-        upload_file_path(content, new_path)
+        # ZIP圧縮 → 処理済みに保存
+        zip_name = os.path.splitext(os.path.basename(file_path))[0] + ".zip"
+        zip_path = f"{PROCESSED_FOLDER}/{zip_name}"
+        upload_compressed_file(content, zip_path)
 
-    # 重複チェック（通知のみにして削除はしない）
+        # 元ファイルを削除（Dropbox内）
+        from dropbox_auth import get_dropbox_access_token
+        import dropbox
+        dbx = dropbox.Dropbox(oauth2_access_token=get_dropbox_access_token())
+        dbx.files_delete_v2(file_path)
+        print(f"🗑️ 元ファイル削除: {file_path}")
+
+    # 重複ファイルの検出と削除
     print("🔁 重複ファイルチェック中...")
-    find_duplicates(FOLDER_PATH)
+    find_duplicates_and_delete(FOLDER_PATH)
 
-def upload_file_path(content, dropbox_path):
+def upload_compressed_file(content, dropbox_path):
     from dropbox import Dropbox
     from dropbox_auth import get_dropbox_access_token
-    import tempfile
 
     dbx = Dropbox(oauth2_access_token=get_dropbox_access_token())
 
-    # 一時ファイルとして保存しアップロード
-    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-        tmp_file.write(content)
-        tmp_file.flush()
-        with open(tmp_file.name, "rb") as f:
+    # 一時ファイルにZIP保存
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+        with zipfile.ZipFile(tmp_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.writestr("data", content)
+        tmp_zip.flush()
+        with open(tmp_zip.name, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
-
-        os.unlink(tmp_file.name)
+        os.unlink(tmp_zip.name)
