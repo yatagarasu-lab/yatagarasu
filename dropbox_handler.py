@@ -1,46 +1,43 @@
 import dropbox
-import hashlib
-import io
 import os
-from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-from dropbox.exceptions import ApiError
+import hashlib
 
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-
-def get_dbx():
-    return dropbox.Dropbox(
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET,
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
-    )
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
 def download_file(path: str) -> bytes:
-    """Dropbox上の指定パスのファイルをバイナリでダウンロード"""
-    dbx = get_dbx()
+    """
+    指定された Dropbox パスからファイルをダウンロードし、バイトデータで返す
+    """
     try:
         metadata, res = dbx.files_download(path)
         return res.content
-    except ApiError as e:
-        raise Exception(f"Dropbox download error: {e}")
+    except Exception as e:
+        print(f"❌ Dropboxダウンロードエラー: {e}")
+        return b''
 
-def list_files(folder_path="/Apps/slot-data-analyzer") -> list:
-    """指定フォルダ内のファイル一覧を取得"""
-    dbx = get_dbx()
+def list_files(folder_path: str = "/Apps/slot-data-analyzer") -> list:
+    """
+    Dropboxフォルダ内のファイル一覧を取得する
+    """
     try:
-        result = dbx.files_list_folder(folder_path)
-        return result.entries
-    except ApiError as e:
-        raise Exception(f"Dropbox list error: {e}")
+        res = dbx.files_list_folder(folder_path)
+        return res.entries
+    except Exception as e:
+        print(f"❌ Dropboxファイル一覧取得エラー: {e}")
+        return []
 
-def file_hash(file_content: bytes) -> str:
-    """ファイルの内容に基づくSHA256ハッシュを返す"""
-    return hashlib.sha256(file_content).hexdigest()
+def file_hash(content: bytes) -> str:
+    """
+    ファイルのSHA256ハッシュを生成（重複検出用）
+    """
+    return hashlib.sha256(content).hexdigest()
 
 def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    """重複ファイルを検出し、不要なファイルを削除（任意でON）"""
-    dbx = get_dbx()
+    """
+    Dropboxフォルダ内の重複ファイルを検出してログに出力。
+    同一ファイルがあれば、後のものを削除する処理も含められる。
+    """
     files = list_files(folder_path)
     hash_map = {}
 
@@ -50,7 +47,11 @@ def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
         hash_value = file_hash(content)
 
         if hash_value in hash_map:
-            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            # dbx.files_delete_v2(path)  # 自動削除したい場合はコメントを解除
+            print(f"⚠️ 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            try:
+                dbx.files_delete_v2(path)
+                print(f"🗑️ 削除済み: {path}")
+            except Exception as e:
+                print(f"❌ 削除エラー: {e}")
         else:
             hash_map[hash_value] = path
