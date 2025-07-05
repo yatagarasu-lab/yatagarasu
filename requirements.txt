@@ -1,6 +1,6 @@
-flask
-gunicorn
-line-bot-sdk==3.4.0
-openai
-python-dotenv
-dropbox
+Flask==3.0.2
+line-bot-sdk==3.5.0
+dropbox==11.36.2
+python-dotenv==1.0.1
+schedule==1.2.1
+gunicorn==21.2.0
