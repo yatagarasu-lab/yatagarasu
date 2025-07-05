@@ -1,8 +1,4 @@
-flask
-gunicorn
-line-bot-sdk
-python-dotenv
-dropbox
-openai
-requests
-Pillow
+Flask==2.3.3
+line-bot-sdk==3.8.0
+dropbox==11.36.2
+gunicorn==21.2.0
