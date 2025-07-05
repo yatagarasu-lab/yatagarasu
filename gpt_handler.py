@@ -1,62 +1,28 @@
-import zipfile
-import io
-import hashlib
+# gpt_handler.py
 import openai
+import hashlib
+import json
+import time
+import re
 
-# OpenAI APIキーは環境変数で設定済みとする
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def file_hash(content: bytes) -> str:
-    """ファイルのハッシュを計算して重複チェック用に返す"""
-    return hashlib.sha256(content).hexdigest()
+# ファイルの内容を判別して「スロット関連」か確認
+def is_slot_related(text):
+    slot_keywords = ["スロット", "設定", "差枚", "北斗", "番長", "ジャグラー", "グラフ", "CZ", "AT", "パチスロ", "解析"]
+    return any(keyword in text for keyword in slot_keywords)
 
-def extract_files_from_zip(zip_data: bytes) -> dict:
-    """ZIPファイルからファイルを抽出して辞書で返す"""
-    extracted = {}
-    with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_file:
-        for name in zip_file.namelist():
-            if not name.endswith("/"):
-                extracted[name] = zip_file.read(name)
-    return extracted
-
-def analyze_with_gpt(filename: str, content: bytes) -> str:
-    """ファイルの中身をGPTで解析する"""
+# GPTで要約・スロット関連確認
+def analyze_file_with_gpt(file_name, content):
     try:
-        if filename.endswith(('.txt', '.log')):
-            text = content.decode('utf-8', errors='ignore')[:3000]
-        else:
-            text = f"ファイル {filename} は非テキスト形式のため内容省略。ファイルタイプ: {filename.split('.')[-1]}"
-        
-        prompt = f"以下の内容を要約または分析してください。\n\n{filename}:\n{text}"
-        
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
+        result = openai.ChatCompletion.create(
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "あなたはデータ分析アシスタントです。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1500,
-            temperature=0.3
+                {"role": "system", "content": "あなたはスロットの専門家です。送られた情報がスロットに関する内容かを確認し、関連あれば要点を要約してください。スロットに無関係なら『これはスロットと無関係です』と返してください。"},
+                {"role": "user", "content": content[:4000]}
+            ]
         )
-        return response.choices[0].message.content.strip()
-
+        reply = result.choices[0].message.content.strip()
+        return reply
     except Exception as e:
-        return f"{filename} の解析中にエラー: {str(e)}"
-
-def analyze_zip_content(zip_data: bytes) -> str:
-    """ZIPの中身を一括でGPT解析してまとめて返す"""
-    files = extract_files_from_zip(zip_data)
-    seen_hashes = set()
-    results = []
-
-    for filename, content in files.items():
-        content_hash = file_hash(content)
-        if content_hash in seen_hashes:
-            results.append(f"{filename}: ✅ 重複ファイルのためスキップ")
-            continue
-
-        seen_hashes.add(content_hash)
-        result = analyze_with_gpt(filename, content)
-        results.append(f"【{filename}】\n{result}\n")
-
-    return "\n\n".join(results)
+        return f"[GPTエラー]: {str(e)}"
