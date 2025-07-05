@@ -1,98 +1,109 @@
 import os
 import hashlib
-from flask import Flask, request, abort
+import time
+from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from linebot.models import MessageEvent, ImageMessage
 import dropbox
+import openai
 from io import BytesIO
+
+# 環境変数からキーを取得
+LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
+DROPBOX_ACCESS_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+LINE_USER_ID = os.environ["LINE_USER_ID"]
+
+# 初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
 app = Flask(__name__)
 
-# LINEの環境変数
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-
-if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
-    raise Exception("LINE環境変数が正しく設定されていません。")
-
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Dropboxの環境変数
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-
-if not DROPBOX_REFRESH_TOKEN or not DROPBOX_APP_KEY or not DROPBOX_APP_SECRET:
-    raise Exception("Dropboxの環境変数が正しく設定されていません。")
-
-# Dropbox接続
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-    app_key=DROPBOX_APP_KEY,
-    app_secret=DROPBOX_APP_SECRET
-)
+def save_to_dropbox(image_bytes):
+    timestamp = str(int(time.time() * 1000))
+    path = f"/Apps/slot-data-analyzer/{timestamp}.jpg"
+    dbx.files_upload(image_bytes, path)
+    print(f"画像保存完了：{path}")
+    return path
 
 def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+    return hashlib.md5(content).hexdigest()
 
-def is_duplicate(content, folder="/Apps/slot-data-analyzer"):
-    hash_new = file_hash(content)
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
+
+def download_file(path):
+    time.sleep(2)  # Dropboxに反映されるまで待つ
     try:
-        res = dbx.files_list_folder(folder)
-        for entry in res.entries:
-            metadata, response = dbx.files_download(entry.path_lower)
-            existing_content = response.content
-            if file_hash(existing_content) == hash_new:
-                return True
+        md, res = dbx.files_download(path)
+        return res.content
     except dropbox.exceptions.ApiError as e:
         print(f"Dropbox APIエラー: {e}")
-    return False
+        return None
 
-@app.route("/")
-def health_check():
-    return "OK", 200
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
 
-@app.route("/callback", methods=['POST'])
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        if content is None:
+            continue
+        hash_value = file_hash(content)
+
+        if hash_value in hash_map:
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            # 重複を削除したい場合は以下を有効化
+            # dbx.files_delete_v2(path)
+        else:
+            hash_map[hash_value] = path
+
+def analyze_image_with_gpt(image_bytes):
+    response = openai.chat.completions.create(
+        model="gpt-4-vision-preview",
+        messages=[
+            {"role": "user", "content": [
+                {"type": "text", "text": "この画像の内容を要約してください"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_bytes.encode('base64')}}
+            ]}
+        ],
+        max_tokens=300
+    )
+    return response.choices[0].message.content
+
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-
-    return 'OK'
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    user_message = event.message.text
-    reply = "ありがとうございます"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    except Exception as e:
+        print(f"Handle error: {e}")
+    return "OK"
 
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_id = event.message.id
-    content = line_bot_api.get_message_content(message_id)
-    image_data = BytesIO(content.content)
+def handle_image_message(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
+    image_data = BytesIO()
+    for chunk in message_content.iter_content():
+        image_data.write(chunk)
+
+    image_bytes = image_data.getvalue()
+    path = save_to_dropbox(image_bytes)
 
     # 重複チェック
-    if is_duplicate(image_data.getvalue()):
-        print("重複画像：保存スキップ")
-        return
+    find_duplicates()
 
-    filename = f"/Apps/slot-data-analyzer/{message_id}.jpg"
-    dbx.files_upload(image_data.getvalue(), filename)
-    print(f"画像保存完了: {filename}")
+    # LINE返信
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="ありがとうございます"))
 
-    # LINE通知
-    line_bot_api.push_message(
-        LINE_USER_ID,
-        TextSendMessage(text="画像をDropboxに保存しました。ありがとうございます")
-    )
-
-if __name__ == "__main__":
-    app.run()
+@app.route("/", methods=["GET"])
+def home():
+    return "OK"
