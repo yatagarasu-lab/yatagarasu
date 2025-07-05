@@ -1,23 +1,33 @@
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-
+# main.py
 import os
-import tempfile
-from dropbox_utils import upload_file
-from analyzer import analyze_file
-
-# 環境変数から取得
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-USER_ID = os.environ.get("LINE_USER_ID")
+from flask import Flask, request, abort
+from linebot.v3 import WebhookHandler
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    TextMessage
+)
+from linebot.v3.exceptions import InvalidSignatureError
+from processor import process_files
+from dropbox_handler import upload_to_dropbox
 
 app = Flask(__name__)
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# LINE Bot 設定
+channel_secret = os.getenv("LINE_CHANNEL_SECRET")
+channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+user_id = os.getenv("LINE_USER_ID")
 
+if channel_secret is None or channel_access_token is None:
+    raise Exception("LINEの環境変数が設定されていません。")
+
+configuration = Configuration(access_token=channel_access_token)
+handler = WebhookHandler(channel_secret)
+
+# LINE webhook エンドポイント
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -27,48 +37,34 @@ def callback():
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+
     return 'OK'
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    text = event.message.text
+# メッセージ処理
+@handler.add(event=WebhookParser)
+def handle_message(event):
+    # POSTされたデータがメッセージイベントか確認
+    if event.message and hasattr(event.message, 'text'):
+        message_text = event.message.text
 
-    # Dropboxへ保存（ファイル名を生成）
-    filename = f"text_{event.timestamp}.txt"
-    upload_file(filename, text.encode('utf-8'))
+        # ユーザーの送信内容をDropboxに保存
+        filename = f"message_{event.timestamp}.txt"
+        upload_to_dropbox(filename, message_text)
 
-    # GPT解析 → 結果を返信
-    result = analyze_file(text.encode('utf-8'), filename)
+        # 返信（固定文）
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            reply = ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text="ありがとうございます")]
+            )
+            line_bot_api.reply_message(reply)
 
-    # LINEに送信
-    line_bot_api.push_message(USER_ID, TextSendMessage(text=result or "ありがとうございます"))
-
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-
-    # 一時ファイル保存
-    with tempfile.NamedTemporaryFile(delete=False) as tf:
-        for chunk in message_content.iter_content():
-            tf.write(chunk)
-        temp_path = tf.name
-
-    filename = f"image_{event.timestamp}.jpg"
-
-    with open(temp_path, "rb") as f:
-        file_bytes = f.read()
-        upload_file(filename, file_bytes)
-
-        result = analyze_file(file_bytes, filename)
-
-    # LINEに送信
-    line_bot_api.push_message(USER_ID, TextSendMessage(text=result or "ありがとうございます"))
-
-    os.remove(temp_path)
-
-@app.route("/")
-def index():
-    return "LINE + Dropbox + GPT Webhook is running"
+# Renderからの手動実行ポイント
+@app.route("/manual-process", methods=["GET"])
+def manual_process():
+    process_files()
+    return "Manual processing complete."
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
