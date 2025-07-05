@@ -1,119 +1,112 @@
 import os
 import hashlib
 import dropbox
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage
 import openai
-from dotenv import load_dotenv
+import requests
+from flask import Flask, request, abort
 
-# 環境変数読み込み
-load_dotenv()
+app = Flask(__name__)
 
-# 各種トークン取得
+# 環境変数
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Flask アプリとインスタンス
-app = Flask(__name__)
+# 初期化
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+openai.api_key = OPENAI_API_KEY
 
-# メモリで重複防止
-hash_memory = set()
 
-# トップページ確認
-@app.route("/", methods=["GET"])
-def home():
-    return "LINE + Dropbox + GPT 連携動作中", 200
+# Dropboxのファイル一覧を取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path, recursive=True)
+    return res.entries
 
-# Dropbox webhook（GET:検証用, POST:通知受取）
-@app.route("/webhook", methods=["GET", "POST"])
-def dropbox_webhook():
-    if request.method == "GET":
-        return request.args.get("challenge"), 200
-    elif request.method == "POST":
-        print("✅ Dropbox webhook received.")
-        process_latest_dropbox_file()
-        return "", 200
 
-# LINE メッセージ受信処理
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
+# ファイルをダウンロードしてハッシュ取得
+def download_file(path):
+    _, res = dbx.files_download(path)
+    return res.content
 
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    return "OK"
 
-# LINEメッセージの返信
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextMessage(text="ありがとうございます")
-    )
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
 
-# Dropbox ファイル処理
-def process_latest_dropbox_file():
-    folder_path = "/Apps/slot-data-analyzer"
-    res = dbx.files_list_folder(folder_path)
-    files = sorted(res.entries, key=lambda x: x.server_modified, reverse=True)
 
-    for file in files:
-        if isinstance(file, dropbox.files.FileMetadata):
-            path = file.path_display
-            _, ext = os.path.splitext(path)
-            if ext.lower() in [".txt", ".md", ".log"]:
-                _, res = dbx.files_download(path)
-                content = res.content.decode("utf-8")
-
-                if is_duplicate(content):
-                    print(f"⚠️ 重複ファイル検出（スキップ）: {path}")
-                    return
-
-                summary = ask_gpt(content)
-                message = f"📄 {file.name} の要約:\n\n{summary}"
-                push_line_message(message)
-                return
-    print("⚠️ 対象ファイルが見つかりません")
-
-def is_duplicate(content):
-    h = hashlib.sha256(content.encode()).hexdigest()
-    if h in hash_memory:
-        return True
-    hash_memory.add(h)
-    return False
-
-def ask_gpt(content):
+# GPTによる解析（テキストファイル想定）
+def analyze_with_gpt(text):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下の文章を要約してください。"},
-                {"role": "user", "content": content}
-            ],
-            max_tokens=300
+            messages=[{"role": "user", "content": text}]
         )
-        return response.choices[0].message["content"].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         return f"要約: GPT解析エラー: {str(e)}"
 
-def push_line_message(text):
-    try:
-        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=text))
-        print("✅ LINEへ送信完了")
-    except Exception as e:
-        print("❌ LINE送信エラー:", str(e))
 
-# 実行
+# LINE通知送信
+def send_line_message(text):
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": text}]
+    }
+    response = requests.post("https://api.line.me/v2/bot/message/push", json=data, headers=headers)
+    return response.status_code
+
+
+# Dropbox Webhookエンドポイント（URLチェック用）
+@app.route("/webhook", methods=["GET", "POST"])
+def dropbox_webhook():
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        return challenge, 200
+
+    if request.method == "POST":
+        print("✅ Dropbox webhook received")
+        handle_dropbox_update()
+        return '', 200
+
+    return abort(400)
+
+
+# Dropbox更新時の処理
+def handle_dropbox_update():
+    folder_path = "/Apps/slot-data-analyzer"
+    files = list_files(folder_path)
+    hash_map = {}
+
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+
+        if hash_value in hash_map:
+            dbx.files_delete_v2(path)
+            print(f"🗑️ 重複ファイル削除: {path}")
+        else:
+            hash_map[hash_value] = path
+            try:
+                if file.name.endswith(".txt"):
+                    text = content.decode("utf-8")
+                    result = analyze_with_gpt(text)
+                    send_line_message(f"📝 {file.name}:\n{result}")
+                else:
+                    send_line_message(f"📁 新規ファイル: {file.name} を受信しました")
+            except Exception as e:
+                send_line_message(f"⚠️ 処理エラー: {str(e)}")
+
+
+# 動作確認用エンドポイント
+@app.route("/")
+def home():
+    return "✅ GPT × Dropbox Bot is running", 200
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(debug=True)
