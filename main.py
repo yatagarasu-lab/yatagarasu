@@ -1,76 +1,140 @@
 import os
 import hashlib
-import time
-import json
-from flask import Flask, request
-import dropbox
+from io import BytesIO
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+import dropbox
+import openai
+from PIL import Image
 
 app = Flask(__name__)
 
-# DropboxとLINEの環境変数
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# 環境変数からキー取得
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+USER_ID = os.getenv("LINE_USER_ID")
 
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+# LINE設定
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ファイル重複判定用ハッシュマップと通知タイミング制御
-file_hash_map = {}
-last_notified_time = 0
-notify_interval = 30  # 秒（30秒間は1通だけ通知）
+# Dropbox & GPT設定
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+# 重複チェック用
+file_hashes = set()
 
-def upload_and_check(file_path, content):
-    global file_hash_map
+def generate_hash(content):
+    return hashlib.sha256(content).hexdigest()
 
-    hash_val = file_hash(content)
-    if hash_val in file_hash_map:
-        print(f"重複検出: {file_path}")
-        return False
-    file_hash_map[hash_val] = file_path
-    dbx.files_upload(content, f"/Apps/slot-data-analyzer/{file_path}", mode=dropbox.files.WriteMode.overwrite)
-    return True
+def is_duplicate(content_hash):
+    if content_hash in file_hashes:
+        return True
+    file_hashes.add(content_hash)
+    return False
 
-def send_line_message(message):
-    global last_notified_time
-    now = time.time()
-    if now - last_notified_time > notify_interval:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
-        last_notified_time = now
-    else:
-        print("通知は省略（まとめて1通）")
+def upload_to_dropbox(file_bytes, file_name):
+    path = f"/Apps/slot-data-analyzer/{file_name}"
+    dbx.files_upload(file_bytes, path, mode=dropbox.files.WriteMode.overwrite)
+    return path
 
-@app.route("/callback", methods=["POST"])
+def analyze_with_gpt(file_bytes, is_image=True):
+    try:
+        if is_image:
+            # 画像のbase64形式をGPT Visionに送る
+            response = openai.chat.completions.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "この画像の内容を要約してください。"},
+                        {"type": "image_url", "image_url": {
+                            "url": "data:image/jpeg;base64," + file_bytes.encode("base64").decode()
+                        }}
+                    ]}
+                ],
+                max_tokens=300
+            )
+        else:
+            response = openai.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": file_bytes}],
+                max_tokens=300
+            )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"GPT解析エラー: {str(e)}"
+
+# 通知済み画像のID（まとめ通知のため）
+notified_ids = set()
+
+@app.route("/callback", methods=['POST'])
 def callback():
-    data = request.get_json()
-    print("受信データ:", json.dumps(data, indent=2, ensure_ascii=False))
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
 
-    for event in data.get("events", []):
-        msg_type = event["message"]["type"]
-        message_id = event["message"]["id"]
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
 
-        if msg_type == "image":
-            # 画像の取得と保存
-            content = line_bot_api.get_message_content(message_id).content
-            file_name = f"{message_id}.jpg"
-            if upload_and_check(file_name, content):
-                send_line_message("画像を Dropbox に保存しました。\nありがとうございます")
-        elif msg_type == "text":
-            text = event["message"]["text"]
-            file_name = f"{message_id}.txt"
-            if upload_and_check(file_name, text.encode()):
-                send_line_message("テキストを Dropbox に保存しました。\nありがとうございます")
+    return 'OK'
 
-    return "OK", 200
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    message_id = event.message.id
 
-@app.route("/", methods=["GET"])
-def index():
-    return "動作中"
+    if message_id in notified_ids:
+        return  # すでに通知済み
+
+    notified_ids.add(message_id)
+
+    # 画像取得
+    message_content = line_bot_api.get_message_content(message_id)
+    image_data = BytesIO(message_content.content)
+    content = image_data.read()
+    hash_val = generate_hash(content)
+
+    if is_duplicate(hash_val):
+        return  # 重複なら何もしない
+
+    # Dropbox保存
+    file_name = f"{message_id}.jpg"
+    upload_to_dropbox(content, file_name)
+
+    # GPT解析（コメントアウトで無効化可能）
+    summary = analyze_with_gpt(content, is_image=True)
+
+    # 通知（1通）
+    line_bot_api.push_message(USER_ID, TextMessage(text="画像をDropboxに保存しました。ありがとうございます"))
+    if summary:
+        line_bot_api.push_message(USER_ID, TextMessage(text="要約: " + summary[:300]))
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text(event):
+    text = event.message.text
+    if len(text) < 10:
+        line_bot_api.reply_message(event.reply_token, TextMessage(text="ありがとうございます"))
+        return
+
+    # 重複チェック
+    hash_val = generate_hash(text.encode())
+    if is_duplicate(hash_val):
+        return
+
+    # Dropbox保存
+    file_name = f"{event.message.id}.txt"
+    upload_to_dropbox(text.encode(), file_name)
+
+    # GPT解析（要約）
+    summary = analyze_with_gpt(text, is_image=False)
+    line_bot_api.push_message(USER_ID, TextMessage(text="テキストをDropboxに保存しました。ありがとうございます"))
+    if summary:
+        line_bot_api.push_message(USER_ID, TextMessage(text="要約: " + summary[:300]))
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
