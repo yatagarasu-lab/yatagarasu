@@ -1,91 +1,57 @@
 from flask import Flask, request
-import dropbox
 import hashlib
+import dropbox
 import os
-import openai
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
 
 app = Flask(__name__)
 
-# 環境変数から読み込み（Render に設定してください）
 DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Dropbox クライアント初期化
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-openai.api_key = OPENAI_API_KEY
-
-
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
-
-
-def download_file(file_path):
-    metadata, res = dbx.files_download(file_path)
-    return res.content
-
 
 def file_hash(content):
     return hashlib.md5(content).hexdigest()
 
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-def is_duplicate(file_path, existing_hashes):
-    content = download_file(file_path)
-    hash_value = file_hash(content)
-    if hash_value in existing_hashes:
-        return True
-    else:
-        existing_hashes.add(hash_value)
-        return False
+def download_file(path):
+    _, res = dbx.files_download(path)
+    return res.content
 
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
 
-def summarize_content(content):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下のデータを要約してください"},
-                {"role": "user", "content": content.decode("utf-8", errors="ignore")}
-            ],
-            max_tokens=300
-        )
-        return response['choices'][0]['message']['content']
-    except Exception as e:
-        return f"要約中にエラー: {str(e)}"
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
 
+        if hash_value in hash_map:
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            dbx.files_delete_v2(path)  # 重複削除（必要に応じて）
+        else:
+            hash_map[hash_value] = path
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return "Webhook確認成功", 200
+        # Dropbox webhook challenge 応答
+        challenge = request.args.get("challenge")
+        return challenge, 200
 
-    elif request.method == "POST":
-        try:
-            files = list_files()
-            hashes = set()
+    if request.method == "POST":
+        print("Webhook received from Dropbox.")
+        # 実行したい処理をここに書く（例：解析トリガー）
+        find_duplicates()
+        return "Webhook received", 200
 
-            for file in files:
-                path = file.path_display
-                content = download_file(path)
+    return "Method Not Allowed", 405
 
-                if is_duplicate(path, hashes):
-                    dbx.files_delete_v2(path)
-                    print(f"🗑️ 重複削除: {path}")
-                    continue
-
-                summary = summarize_content(content)
-                line_bot_api.push_message(
-                    LINE_USER_ID,
-                    TextSendMessage(text=f"📝 {file.name}の要約:\n{summary}")
-                )
-                print(f"✅ 処理完了: {file.name}")
-
-            return "", 200
-
-        except Exception as e:
-            print("❌ エラー:", str(e))
-            return "Error", 500
+if __name__ == "__main__":
+    app.run(debug=True)
