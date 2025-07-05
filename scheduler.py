@@ -34,3 +34,22 @@ def monitor_dropbox():
                         continue  # 重複解析を防ぐ
 
                     checked_hashes.add(hash_val)
+                                        # ファイルタイプの判定
+                    if is_image(filename):
+                        file_type = "image"
+                    elif is_text(filename):
+                        file_type = "text"
+                    else:
+                        print(f"❌ 対応外のファイル形式: {filename}")
+                        continue
+
+                    print(f"🧠 新しいファイルを解析中: {filename}")
+                    analyze_and_notify(path, file_type, filename)
+
+        except Exception as e:
+            print(f"⚠️ エラーが発生しました: {e}")
+
+        time.sleep(60)  # 60秒ごとに監視
+                    if __name__ == "__main__":
+    print("🕒 定時監視BOT 起動中（1分ごとにDropboxを監視）")
+    monitor_dropbox()
