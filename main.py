@@ -1,96 +1,67 @@
-from flask import Flask, request, Response
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import TextSendMessage
-import dropbox
-import hashlib
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import TextMessage, MessageEvent, TextSendMessage
 import os
-import io
-from PIL import Image
-import logging
+import time
+import dropbox
 
-# 環境変数から各種キーを取得（Renderに設定済みであること）
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")
+# Dropbox設定
 DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-
-# Flaskアプリの初期化
-app = Flask(__name__)
-
-# LINE API 初期化
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-
-# Dropbox API 初期化
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# 重複チェック用ハッシュマップ
-hash_map = {}
+# LINE設定
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"
 
-def file_hash(content):
-    """ファイルのSHA256ハッシュを返す"""
-    return hashlib.sha256(content).hexdigest()
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def is_duplicate_file(content):
-    """重複ファイルかを判定する"""
-    h = file_hash(content)
-    if h in hash_map:
-        return True
-    hash_map[h] = True
-    return False
+# Flaskアプリケーション
+app = Flask(__name__)
 
-def list_files(folder_path):
-    """Dropbox内のファイル一覧を取得"""
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+# 通知間隔制御
+last_notification_time = 0
+notification_interval = 60  # 秒
 
-def download_file(path):
-    """Dropboxのファイルをダウンロード"""
-    metadata, res = dbx.files_download(path)
-    return res.content
+@app.route("/")
+def health_check():
+    return "OK"
 
-def summarize_image(content):
-    """画像を要約（仮処理：サイズ情報を送信）"""
-    image = Image.open(io.BytesIO(content))
-    width, height = image.size
-    return f"画像サイズ: {width}x{height}"
+@app.route("/callback", methods=['POST'])
+def callback():
+    global last_notification_time
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    # Dropbox 検証用（GETでchallenge返す）
-    if request.method == "GET":
-        challenge = request.args.get("challenge")
-        return Response(challenge, status=200)
+    signature = request.headers.get('X-Line-Signature')
+    body = request.get_data(as_text=True)
 
-    # 実際のWebhook通知（POST）
-    print("✅ Dropbox Webhook 受信")
+    app.logger.info(f"Request body: {body}")
 
     try:
-        folder_path = "/Apps/slot-data-analyzer"
-        files = list_files(folder_path)
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
 
-        for file in files:
-            if isinstance(file, dropbox.files.FileMetadata):
-                path = file.path_display
-                content = download_file(path)
+    # Push通知を間引く処理
+    now = time.time()
+    if now - last_notification_time > notification_interval:
+        try:
+            line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
+            last_notification_time = now
+            app.logger.info("Push通知送信成功")
+        except Exception as e:
+            app.logger.error(f"Push通知送信エラー: {e}")
+    else:
+        app.logger.info("通知スキップ（間隔内）")
 
-                if is_duplicate_file(content):
-                    print(f"⚠️ 重複ファイル検出: {path}")
-                    continue
+    return 'OK'
 
-                summary = summarize_image(content)
-                message = f"📥 新しいファイル:\n{file.name}\n{summary}"
-                line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
-                print(f"✅ LINE送信: {file.name}")
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    # 通常のテキストメッセージの受信処理（応答不要）
+    app.logger.info(f"受信メッセージ: {event.message.text}")
+    return
 
-    except Exception as e:
-        logging.exception("エラー発生")
-        return Response("Internal Server Error", status=500)
-
-    return Response("OK", status=200)
-
-@app.route("/callback", methods=["POST"])
-def callback():
-    return "OK", 200
-
-@app.route("/", methods=["GET"])
-def health_check():
-    return "✅ App is running.", 200
+if __name__ == "__main__":
+    app.run()
