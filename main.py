@@ -1,63 +1,74 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import TextSendMessage
-from apscheduler.schedulers.background import BackgroundScheduler
-from dropbox_handler import download_file, find_duplicates
-from gpt_handler import analyze_zip_content
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 
 import os
-import threading
+import tempfile
+from dropbox_utils import upload_file
+from analyzer import analyze_file
+
+# 環境変数から取得
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+USER_ID = os.environ.get("LINE_USER_ID")
 
 app = Flask(__name__)
-line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
-handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
-USER_ID = os.getenv("LINE_USER_ID")
-LOCK = threading.Lock()  # 排他制御用ロック
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-@app.route("/dropbox_webhook", methods=["POST"])
-def handle_dropbox_webhook():
-    if not LOCK.acquire(blocking=False):
-        return "🔁 解析中のためスキップ", 429
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
 
     try:
-        path = "/Apps/slot-data-analyzer/latest_upload.zip"
-        zip_data = download_file(path)
-        result = analyze_zip_content(zip_data)
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=result[:4000]))
-        return "OK", 200
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
 
-    except Exception as e:
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=f"❌ Webhookエラー: {e}"))
-        return abort(500)
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text(event):
+    text = event.message.text
 
-    finally:
-        LOCK.release()
+    # Dropboxへ保存（ファイル名を生成）
+    filename = f"text_{event.timestamp}.txt"
+    upload_file(filename, text.encode('utf-8'))
 
-# 定時解析（夜21時）
-def scheduled_analysis():
-    if not LOCK.acquire(blocking=False):
-        print("🔁 定時解析：同時実行防止のためスキップ")
-        return
+    # GPT解析 → 結果を返信
+    result = analyze_file(text.encode('utf-8'), filename)
 
-    try:
-        path = "/Apps/slot-data-analyzer/latest_upload.zip"
-        zip_data = download_file(path)
-        result = analyze_zip_content(zip_data)
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=f"🕘定時解析結果:\n{result[:4000]}"))
-    except Exception as e:
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=f"❌ 定時解析エラー: {e}"))
-    finally:
-        LOCK.release()
+    # LINEに送信
+    line_bot_api.push_message(USER_ID, TextSendMessage(text=result or "ありがとうございます"))
 
-# 定時ジョブの起動
-scheduler = BackgroundScheduler()
-scheduler.add_job(scheduled_analysis, "cron", hour=21, minute=0)
-scheduler.start()
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    return "✅ Server is running", 200
+    # 一時ファイル保存
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        for chunk in message_content.iter_content():
+            tf.write(chunk)
+        temp_path = tf.name
+
+    filename = f"image_{event.timestamp}.jpg"
+
+    with open(temp_path, "rb") as f:
+        file_bytes = f.read()
+        upload_file(filename, file_bytes)
+
+        result = analyze_file(file_bytes, filename)
+
+    # LINEに送信
+    line_bot_api.push_message(USER_ID, TextSendMessage(text=result or "ありがとうございます"))
+
+    os.remove(temp_path)
+
+@app.route("/")
+def index():
+    return "LINE + Dropbox + GPT Webhook is running"
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
