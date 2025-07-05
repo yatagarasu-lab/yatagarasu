@@ -1,39 +1,55 @@
-import dropbox
-import hashlib
-from dotenv import load_dotenv
 import os
+import json
+from dropbox import Dropbox
+from analyze_file import analyze_file
+from line_push import send_line_message
+from utils import is_duplicate, save_hash
+from dotenv import load_dotenv
 
 load_dotenv()
 
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+MONITOR_FOLDER = os.getenv("DROPBOX_MONITOR_FOLDER", "/Apps/slot-data-analyzer")
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+dbx = Dropbox(DROPBOX_ACCESS_TOKEN)
 
-def save_to_dropbox(file_data, path):
-    # 重複チェック用：全ファイル走査
-    existing_files = dbx.files_list_folder(os.path.dirname(path)).entries
-    hashes = {}
+def handle_dropbox_webhook(request):
+    body = json.loads(request.data.decode("utf-8"))
 
-    for file in existing_files:
-        try:
-            _, res = dbx.files_download(file.path_display)
-            content = res.content
-            hash_value = file_hash(content)
+    for account in body.get("list_folder", {}).get("accounts", []):
+        print(f"📥 更新を検知したアカウント: {account}")
+        process_recent_files()
 
-            if hash_value in hashes:
-                # 重複ファイルは削除
-                print(f"重複ファイル削除: {file.path_display}")
-                dbx.files_delete_v2(file.path_display)
-            else:
-                hashes[hash_value] = file.path_display
-        except Exception as e:
-            print(f"重複チェック失敗: {e}")
-
-    # 新規ファイルアップロード
+def process_recent_files():
     try:
-        dbx.files_upload(file_data, path, mode=dropbox.files.WriteMode.overwrite)
-        print(f"アップロード成功: {path}")
+        entries = dbx.files_list_folder(MONITOR_FOLDER, recursive=False).entries
     except Exception as e:
-        print(f"アップロード失敗: {e}")
+        print(f"❌ Dropboxフォルダ読み込み失敗: {e}")
+        return
+
+    for entry in entries:
+        if hasattr(entry, "path_lower") and not entry.name.startswith("."):
+            file_path = entry.path_display
+            print(f"🔍 ファイル検出: {file_path}")
+
+            # 重複チェック
+            content, res = None, None
+            try:
+                _, res = dbx.files_download(file_path)
+                content = res.content
+            except Exception as e:
+                print(f"❌ ダウンロード失敗: {e}")
+                continue
+
+            if is_duplicate(content):
+                print(f"⚠️ 重複ファイル: {file_path}")
+                continue
+            else:
+                save_hash(content)
+
+            try:
+                result = analyze_file(file_path)
+                if os.getenv("LINE_PUSH_ENABLED", "true").lower() == "true":
+                    send_line_message(f"✅ 解析完了: {os.path.basename(file_path)}\n\n{result[:300]}...")
+            except Exception as e:
+                print(f"❌ ファイル解析エラー: {e}")
