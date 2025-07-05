@@ -1,63 +1,76 @@
-from flask import Flask, request
-import hashlib
-import dropbox
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage
 import os
+import dropbox
+from datetime import datetime
+from gpt_logic import analyze_and_save
+from dropbox_handler import save_to_dropbox
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# 環境変数からトークンを取得
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+# LINE API
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Dropbox クライアント初期化
+# Dropbox
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# ファイルのハッシュを計算
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
 
-# 指定フォルダのファイル一覧を取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
 
-# ファイルをダウンロード
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content
+    return 'OK'
 
-# 重複ファイルを削除
-def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    hash_map = {}
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    text = event.message.text
+    user_id = event.source.user_id
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
+    # スロット以外はGPTとやり取りをDropboxへ保存
+    save_to_dropbox(text.encode(), f"/会話記録/{datetime.now().isoformat()}_{user_id}.txt")
+    analyze_and_save(text, is_image=False)
 
-        if hash_value in hash_map:
-            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            dbx.files_delete_v2(path)  # 重複ファイルを削除
-        else:
-            hash_map[hash_value] = path
+    # 返信（固定）
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextMessage(text="ありがとうございます")
+    )
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        # Dropbox webhook のチャレンジ応答
-        challenge = request.args.get("challenge")
-        return challenge, 200
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    user_id = event.source.user_id
+    message_id = event.message.id
 
-    if request.method == "POST":
-        # ファイル処理を非同期で行う場合など、ここで通知受信
-        print("Webhook POST 受信 - Dropboxファイル確認開始")
-        try:
-            find_duplicates()
-        except Exception as e:
-            print(f"エラー: {e}")
-        return "Webhook received", 200
+    # LINE画像を取得
+    message_content = line_bot_api.get_message_content(message_id)
+    image_data = b''.join(chunk for chunk in message_content.iter_content())
 
-    return "Method Not Allowed", 405
+    # Dropboxに保存（スロット画像専用）
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dropbox_path = f"/スロットデータ/{timestamp}_{user_id}.jpg"
+    save_to_dropbox(image_data, dropbox_path)
+
+    analyze_and_save(image_data, is_image=True)
+
+    # 返信（固定）
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextMessage(text="ありがとうございます")
+    )
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True)
