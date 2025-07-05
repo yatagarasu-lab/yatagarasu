@@ -1,67 +1,76 @@
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import TextMessage, MessageEvent, TextSendMessage
 import os
+import hashlib
 import time
+import json
+from flask import Flask, request
 import dropbox
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import TextSendMessage
 
-# Dropbox設定
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-# LINE設定
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"
-
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Flaskアプリケーション
 app = Flask(__name__)
 
-# 通知間隔制御
-last_notification_time = 0
-notification_interval = 60  # 秒
+# DropboxとLINEの環境変数
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-@app.route("/")
-def health_check():
-    return "OK"
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    global last_notification_time
+# ファイル重複判定用ハッシュマップと通知タイミング制御
+file_hash_map = {}
+last_notified_time = 0
+notify_interval = 30  # 秒（30秒間は1通だけ通知）
 
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
 
-    app.logger.info(f"Request body: {body}")
+def upload_and_check(file_path, content):
+    global file_hash_map
 
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
+    hash_val = file_hash(content)
+    if hash_val in file_hash_map:
+        print(f"重複検出: {file_path}")
+        return False
+    file_hash_map[hash_val] = file_path
+    dbx.files_upload(content, f"/Apps/slot-data-analyzer/{file_path}", mode=dropbox.files.WriteMode.overwrite)
+    return True
 
-    # Push通知を間引く処理
+def send_line_message(message):
+    global last_notified_time
     now = time.time()
-    if now - last_notification_time > notification_interval:
-        try:
-            line_bot_api.push_message(USER_ID, TextSendMessage(text="ありがとうございます"))
-            last_notification_time = now
-            app.logger.info("Push通知送信成功")
-        except Exception as e:
-            app.logger.error(f"Push通知送信エラー: {e}")
+    if now - last_notified_time > notify_interval:
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+        last_notified_time = now
     else:
-        app.logger.info("通知スキップ（間隔内）")
+        print("通知は省略（まとめて1通）")
 
-    return 'OK'
+@app.route("/callback", methods=["POST"])
+def callback():
+    data = request.get_json()
+    print("受信データ:", json.dumps(data, indent=2, ensure_ascii=False))
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    # 通常のテキストメッセージの受信処理（応答不要）
-    app.logger.info(f"受信メッセージ: {event.message.text}")
-    return
+    for event in data.get("events", []):
+        msg_type = event["message"]["type"]
+        message_id = event["message"]["id"]
+
+        if msg_type == "image":
+            # 画像の取得と保存
+            content = line_bot_api.get_message_content(message_id).content
+            file_name = f"{message_id}.jpg"
+            if upload_and_check(file_name, content):
+                send_line_message("画像を Dropbox に保存しました。\nありがとうございます")
+        elif msg_type == "text":
+            text = event["message"]["text"]
+            file_name = f"{message_id}.txt"
+            if upload_and_check(file_name, text.encode()):
+                send_line_message("テキストを Dropbox に保存しました。\nありがとうございます")
+
+    return "OK", 200
+
+@app.route("/", methods=["GET"])
+def index():
+    return "動作中"
 
 if __name__ == "__main__":
     app.run()
