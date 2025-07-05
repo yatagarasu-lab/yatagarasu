@@ -1,76 +1,100 @@
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, ImageMessage
 import os
+import tempfile
 import dropbox
-from datetime import datetime
-from gpt_logic import analyze_and_save
-from dropbox_handler import save_to_dropbox
-from dotenv import load_dotenv
+import hashlib
 
-load_dotenv()
+from gpt_logic import summarize_file
+from dropbox_utils import upload_to_dropbox, list_files, download_file, file_hash
 
 app = Flask(__name__)
 
-# LINE API
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# LINE Messaging API
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Dropbox
+# Dropbox API
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers['X-Line-Signature']
+# 保存先パス
+DATA_FOLDER = "/Apps/slot-data-analyzer"
+
+@app.route("/")
+def index():
+    return "LINE-GPT-DROPBOX連携BOT"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except Exception as e:
+        print(f"Webhookエラー: {e}")
         abort(400)
 
-    return 'OK'
+    return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
+def handle_text(event):
     text = event.message.text
-    user_id = event.source.user_id
 
-    # スロット以外はGPTとやり取りをDropboxへ保存
-    save_to_dropbox(text.encode(), f"/会話記録/{datetime.now().isoformat()}_{user_id}.txt")
-    analyze_and_save(text, is_image=False)
+    # 返信は全て固定
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="ありがとうございます"))
 
-    # 返信（固定）
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextMessage(text="ありがとうございます")
-    )
+    # GPTとのやりとりも保存
+    filename = f"{event.timestamp}_user.txt"
+    upload_to_dropbox(DATA_FOLDER + "/会話ログ/" + filename, text.encode())
 
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    user_id = event.source.user_id
-    message_id = event.message.id
+def handle_image(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
 
-    # LINE画像を取得
-    message_content = line_bot_api.get_message_content(message_id)
-    image_data = b''.join(chunk for chunk in message_content.iter_content())
+    with tempfile.NamedTemporaryFile(delete=False) as tf:
+        for chunk in message_content.iter_content():
+            tf.write(chunk)
 
-    # Dropboxに保存（スロット画像専用）
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    dropbox_path = f"/スロットデータ/{timestamp}_{user_id}.jpg"
-    save_to_dropbox(image_data, dropbox_path)
+    filename = f"{event.timestamp}.jpg"
 
-    analyze_and_save(image_data, is_image=True)
+    # Dropboxにアップロード
+    dropbox_path = DATA_FOLDER + "/画像/" + filename
+    upload_to_dropbox(dropbox_path, open(tf.name, "rb").read())
 
-    # 返信（固定）
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextMessage(text="ありがとうございます")
-    )
+    # GPT解析
+    summary = summarize_file(open(tf.name, "rb").read(), filename)
+
+    # 要約も保存
+    summary_path = DATA_FOLDER + "/要約/" + filename.replace(".jpg", ".txt")
+    upload_to_dropbox(summary_path, summary.encode())
+
+    # LINEへ通知
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="画像を受信し、解析・保存しました"))
+
+# 重複検出タスク（定期または手動）
+@app.route("/check_duplicates")
+def check_duplicates():
+    files = list_files(DATA_FOLDER)
+    hash_map = {}
+
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+
+        if hash_value in hash_map:
+            dbx.files_delete_v2(path)
+        else:
+            hash_map[hash_value] = path
+
+    return "重複チェック完了"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
