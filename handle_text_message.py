@@ -1,4 +1,3 @@
-# handle_text_message.py
 from linebot.models import TextSendMessage
 
 def handle_text_message(event, line_bot_api):
