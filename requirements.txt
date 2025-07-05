@@ -4,3 +4,4 @@ dropbox==11.36.2
 python-dotenv==1.0.1
 schedule==1.2.1
 gunicorn==21.2.0
+openai
