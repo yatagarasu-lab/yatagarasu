@@ -1,39 +1,45 @@
-import zipfile
 import openai
 import os
+from PIL import Image
+import base64
 from io import BytesIO
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_data: bytes) -> str:
+def analyze_image(image_bytes):
+    """
+    画像バイトデータをGPT-4 Visionで解析して要約テキストを返す関数
+    :param image_bytes: バイト型画像データ（Dropboxから取得した画像）
+    :return: 要約または解析結果のテキスト
+    """
     try:
-        result_summary = []
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        with zipfile.ZipFile(BytesIO(zip_data)) as zip_file:
-            for file_info in zip_file.infolist():
-                if file_info.filename.endswith(".txt"):
-                    with zip_file.open(file_info.filename) as f:
-                        content = f.read().decode("utf-8", errors="ignore")
-                        summary = summarize_text(content, file_info.filename)
-                        result_summary.append(summary)
-
-        return "\n\n".join(result_summary)
-
-    except Exception as e:
-        return f"ZIP解析中にエラーが発生しました: {e}"
-
-def summarize_text(text: str, filename: str) -> str:
-    try:
         response = openai.ChatCompletion.create(
-            model="gpt-4-1106-preview",  # 必要に応じて変更可能
+            model="gpt-4-vision-preview",
             messages=[
-                {"role": "system", "content": "あなたは要約のプロです。内容をできる限り簡潔にわかりやすく要約してください。"},
-                {"role": "user", "content": f"次のテキストファイル（{filename}）の要約をお願いします:\n\n{text[:4000]}"}
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "この画像の内容を要約し、わかりやすく説明してください。"
+                        }
+                    ]
+                }
             ],
-            temperature=0.3,
+            max_tokens=1000
         )
-        summary = response.choices[0].message.content.strip()
-        return f"🗂 {filename} の要約:\n{summary}"
+
+        result = response.choices[0].message["content"]
+        return result
 
     except Exception as e:
-        return f"要約エラー（{filename}）: {e}"
+        print(f"❌ GPT画像解析エラー: {e}")
+        return f"⚠️ 画像の解析中にエラーが発生しました: {e}"
