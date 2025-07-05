@@ -1,39 +1,56 @@
 import dropbox
-import os
 import hashlib
-from datetime import datetime
+import os
 
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-FOLDER_PATH = "/Apps/slot-data-analyzer"
-
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-def save_uploaded_file(data, extension="txt"):
-    # 一意のファイル名を生成
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{FOLDER_PATH}/{timestamp}.{extension}"
-    dbx.files_upload(data, filename, mode=dropbox.files.WriteMode("overwrite"))
-    return filename
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
+
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    try:
+        res = dbx.files_list_folder(folder_path)
+        return res.entries
+    except Exception as e:
+        print(f"リスト取得エラー: {e}")
+        return []
 
 def download_file(path):
-    metadata, res = dbx.files_download(path)
-    return res.content
+    try:
+        metadata, res = dbx.files_download(path)
+        return res.content
+    except Exception as e:
+        print(f"ダウンロードエラー: {e}")
+        return None
 
-def file_hash(data):
-    return hashlib.sha256(data).hexdigest()
-
-def find_duplicates():
-    files = dbx.files_list_folder(FOLDER_PATH).entries
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
     hash_map = {}
+    duplicates = []
 
     for file in files:
-        if isinstance(file, dropbox.files.FileMetadata):
-            path = file.path_display
-            content = download_file(path)
-            h = file_hash(content)
+        path = file.path_display
+        content = download_file(path)
+        if content is None:
+            continue
+        hash_value = file_hash(content)
 
-            if h in hash_map:
-                print(f"重複ファイル検出: {path} == {hash_map[h]}")
-                # dbx.files_delete_v2(path)  # 削除する場合はコメント解除
-            else:
-                hash_map[h] = path
+        if hash_value in hash_map:
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            dbx.files_delete_v2(path)
+            duplicates.append(path)
+        else:
+            hash_map[hash_value] = path
+
+    return duplicates
+
+def clean_old_files(folder_path="/Apps/slot-data-analyzer", keep=10):
+    files = sorted(list_files(folder_path), key=lambda f: f.server_modified, reverse=True)
+    old_files = files[keep:]
+    for file in old_files:
+        try:
+            dbx.files_delete_v2(file.path_display)
+            print(f"古いファイル削除: {file.path_display}")
+        except Exception as e:
+            print(f"削除失敗: {file.path_display} - {e}")
