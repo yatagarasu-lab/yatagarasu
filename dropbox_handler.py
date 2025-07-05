@@ -1,24 +1,23 @@
-def file_hash(content):
-    return md5(content).hexdigest()
+def is_image(filename):
+    return filename.lower().endswith(('.png', '.jpg', '.jpeg'))
 
-def delete_file(path):
+def is_text(filename):
+    return filename.lower().endswith('.txt')
+
+def list_and_filter_files():
+    files = list_files(DROPBOX_FOLDER_PATH)
+    image_files = [f for f in files if is_image(f.name)]
+    text_files = [f for f in files if is_text(f.name)]
+    return image_files, text_files
+
+def move_file_to_archive(path):
     try:
-        dbx.files_delete_v2(path)
-        print(f"[delete_file] Deleted: {path}")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.basename(path)
+        new_path = f"{DROPBOX_ARCHIVE_PATH}/{timestamp}_{filename}"
+        dbx.files_move_v2(path, new_path)
+        print(f"[move_file_to_archive] Moved {path} -> {new_path}")
+        return new_path
     except Exception as e:
-        print(f"[delete_file] Error: {e}")
-
-def find_duplicates(folder_path=DROPBOX_FOLDER_PATH):
-    files = list_files(folder_path)
-    hash_map = {}
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        if content is None:
-            continue
-        hash_value = file_hash(content)
-        if hash_value in hash_map:
-            print(f"[find_duplicates] Duplicate found: {path} (same as {hash_map[hash_value]})")
-            delete_file(path)
-        else:
-            hash_map[hash_value] = path
+        print(f"[move_file_to_archive] Error: {e}")
+        return path
