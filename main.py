@@ -1,70 +1,111 @@
-# main.py
 import os
+import hashlib
 from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.webhook import WebhookParser
-from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    ReplyMessageRequest,
-    TextMessage
-)
-from linebot.v3.exceptions import InvalidSignatureError
-from processor import process_files
-from dropbox_handler import upload_to_dropbox
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+import dropbox
+import openai
+from datetime import datetime
 
+# Flaskアプリ設定
 app = Flask(__name__)
 
-# LINE Bot 設定
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-user_id = os.getenv("LINE_USER_ID")
+# 環境変数取得
+CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+TARGET_FOLDER_PATH = os.environ.get("TARGET_FOLDER_PATH", "/Apps/slot-data-analyzer")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
-if channel_secret is None or channel_access_token is None:
-    raise Exception("LINEの環境変数が設定されていません。")
+# 各API初期化
+line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-configuration = Configuration(access_token=channel_access_token)
-handler = WebhookHandler(channel_secret)
+# ファイル保存処理
+def save_to_dropbox(file_content, filename):
+    path = f"{TARGET_FOLDER_PATH}/{filename}"
+    dbx.files_upload(file_content, path, mode=dropbox.files.WriteMode.overwrite)
+    return path
 
-# LINE webhook エンドポイント
+# ファイルの重複チェック用ハッシュ生成
+def file_hash(data):
+    return hashlib.sha256(data).hexdigest()
+
+# Dropbox内のファイルと重複判定
+def is_duplicate(new_data):
+    try:
+        files = dbx.files_list_folder(TARGET_FOLDER_PATH).entries
+        for f in files:
+            if isinstance(f, dropbox.files.FileMetadata):
+                _, res = dbx.files_download(f.path_display)
+                if file_hash(res.content) == file_hash(new_data):
+                    return True
+    except Exception:
+        pass
+    return False
+
+# GPT解析処理
+def analyze_with_gpt(content):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "以下の内容がスロットかパチンコに関係する場合はA（スロット）、B（パチンコ）、それ以外はCとだけ返してください。"},
+                {"role": "user", "content": content}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"解析失敗: {e}"
+
+# LINEのWebhook受信
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-
     return 'OK'
 
-# メッセージ処理
-@handler.add(event=WebhookParser)
-def handle_message(event):
-    # POSTされたデータがメッセージイベントか確認
-    if event.message and hasattr(event.message, 'text'):
-        message_text = event.message.text
+# メッセージイベント処理
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    content = event.message.text.encode('utf-8')
+    classification = analyze_with_gpt(content.decode("utf-8"))
 
-        # ユーザーの送信内容をDropboxに保存
-        filename = f"message_{event.timestamp}.txt"
-        upload_to_dropbox(filename, message_text)
+    if classification == "A" or classification == "B":
+        filename = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        save_to_dropbox(content, filename)
+        if event.source.user_id == LINE_USER_ID:
+            line_bot_api.push_message(LINE_USER_ID, TextMessage(text="ありがとうございます"))
+    else:
+        # スロパチ以外 → 無視
+        pass
 
-        # 返信（固定文）
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            reply = ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="ありがとうございます")]
-            )
-            line_bot_api.reply_message(reply)
+# 画像イベント処理
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
+    image_data = message_content.content
 
-# Renderからの手動実行ポイント
-@app.route("/manual-process", methods=["GET"])
-def manual_process():
-    process_files()
-    return "Manual processing complete."
+    if is_duplicate(image_data):
+        return  # 重複なら保存せず終了
 
+    classification = analyze_with_gpt("これはスロットまたはパチンコの画像ですか？")
+
+    if classification == "A" or classification == "B":
+        filename = f"image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        save_to_dropbox(image_data, filename)
+        if event.source.user_id == LINE_USER_ID:
+            line_bot_api.push_message(LINE_USER_ID, TextMessage(text="ありがとうございます"))
+
+# 起動用
 if __name__ == "__main__":
     app.run()
