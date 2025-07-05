@@ -1,55 +1,54 @@
 import zipfile
 import io
-import base64
 import openai
 import os
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+def analyze_zip_content(zip_bytes):
+    """ZIPファイルをGPTに解析させて要約する処理"""
 
-def analyze_zip_content(zip_bytes: bytes) -> str:
-    """
-    ZIPファイルの内容を読み取り、画像やテキストをChatGPTで要約
-    """
+    # ZIP解凍
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_file:
-            extracted_texts = []
+            summaries = []
 
             for name in zip_file.namelist():
-                with zip_file.open(name) as file:
-                    if name.endswith((".txt", ".csv")):
-                        text_data = file.read().decode("utf-8", errors="ignore")
-                        extracted_texts.append(f"【{name}】\n{text_data}\n")
-                    elif name.endswith((".png", ".jpg", ".jpeg")):
-                        image_bytes = file.read()
-                        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                        image_prompt = {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": f"次の画像を解析して内容を要約してください（ファイル名: {name}）:"},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                            ]
-                        }
-                        image_result = openai.chat.completions.create(
-                            model="gpt-4-vision-preview",
-                            messages=[image_prompt],
-                            max_tokens=1000
-                        )
-                        extracted_texts.append(f"【{name}（画像）】\n{image_result.choices[0].message.content}\n")
+                if name.endswith((".txt", ".csv", ".json", ".log")):
+                    with zip_file.open(name) as file:
+                        content = file.read().decode("utf-8", errors="ignore")
 
-            all_text = "\n\n".join(extracted_texts)
+                        # GPTによる要約
+                        summary = call_gpt_summary(content, name)
+                        summaries.append(f"【{name}】\n{summary}\n")
 
-            # 全体要約
-            final_summary = openai.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "あなたはDropboxのZIPデータを要約・分析するAIです。"},
-                    {"role": "user", "content": f"次のデータを要約・解析してください:\n{all_text}"}
-                ],
-                max_tokens=1500
-            )
-
-            return final_summary.choices[0].message.content
+            if summaries:
+                return "\n".join(summaries)
+            else:
+                return "⚠️ ZIP内に解析対象ファイル（txt/csv/json/log）が見つかりませんでした。"
 
     except Exception as e:
         return f"❌ ZIP解析エラー: {e}"
+
+def call_gpt_summary(text, filename=""):
+    """GPTにテキストを送って要約させる処理"""
+
+    prompt = f"""
+あなたはDropboxに保存されたスロットの分析データを読んで要点を抽出するAIです。
+ファイル名: {filename}
+内容の要点、傾向、注目すべき点を箇条書きで3〜5行で日本語でまとめてください。
+
+対象データ:
+{text[:3000]}  # 長すぎると失敗するので先頭のみ使う
+"""
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",  # または gpt-3.5-turbo
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        return response.choices[0].message["content"].strip()
+
+    except Exception as e:
+        return f"❌ GPT解析失敗: {e}"
