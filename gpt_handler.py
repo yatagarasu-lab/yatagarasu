@@ -1,54 +1,78 @@
 import zipfile
 import io
-import os
 import openai
+import os
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_bytes: bytes) -> str:
+def analyze_zip_content(zip_data: bytes) -> str:
     """
-    ZIPファイルの中身を解凍・要約し、GPTに渡して解析結果を返す
+    ZIPデータを展開し、中身のテキスト・画像ファイルをGPTで解析して要約する。
     """
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_file:
-            summaries = []
+        summary = []
+
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_file:
             for filename in zip_file.namelist():
-                if filename.endswith((".txt", ".csv", ".json", ".md", ".log")):
-                    with zip_file.open(filename) as file:
-                        content = file.read().decode("utf-8", errors="ignore")
-                        summary = summarize_with_gpt(filename, content)
-                        summaries.append(f"📄 {filename}:\n{summary}\n")
-                else:
-                    summaries.append(f"📁 {filename}: （非対応ファイル）")
+                if filename.endswith(".txt"):
+                    content = zip_file.read(filename).decode("utf-8", errors="ignore")
+                    gpt_summary = gpt_summarize(content)
+                    summary.append(f"📝 {filename}:\n{gpt_summary}\n")
 
-            return "\n".join(summaries) if summaries else "⚠️ ZIP内に対応ファイルが見つかりませんでした。"
+                elif filename.lower().endswith((".jpg", ".jpeg", ".png")):
+                    image_data = zip_file.read(filename)
+                    gpt_image = gpt_image_analysis(image_data)
+                    summary.append(f"🖼️ {filename}:\n{gpt_image}\n")
 
-    except zipfile.BadZipFile:
-        return "❌ ZIPファイルの形式が正しくありません。"
+        if not summary:
+            return "⚠️ ZIP内に対応可能なファイル（.txt/.jpg/.png）が見つかりませんでした。"
 
-def summarize_with_gpt(filename: str, content: str) -> str:
-    """
-    GPTでファイル内容を要約する
-    """
-    prompt = f"""
-以下はファイル「{filename}」の内容です。一言で要点をまとめてください。必要があれば詳細にも触れて構いません。
-
---- 内容開始 ---
-{content[:2000]}  # GPT-4は長文に対応していますが、制限付きで切り取っています
---- 内容終了 ---
-"""
-
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "あなたはファイル要約の専門家です。"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=500,
-            temperature=0.5
-        )
-        return response.choices[0].message.content.strip()
+        return "\n\n".join(summary)
 
     except Exception as e:
-        return f"❌ 要約中にエラー発生: {e}"
+        print(f"❌ ZIP解析エラー: {e}")
+        return f"⚠️ ZIP解析中にエラーが発生しました: {e}"
+
+def gpt_summarize(text: str) -> str:
+    """
+    テキストデータをGPTで要約する
+    """
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "以下の内容を簡潔に要約してください。"},
+                {"role": "user", "content": text[:4000]}  # 長すぎる場合を考慮
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ テキスト要約エラー: {e}")
+        return "⚠️ テキスト要約に失敗しました"
+
+def gpt_image_analysis(image_data: bytes) -> str:
+    """
+    画像データをGPT-4oのvisionで解析して内容を説明する
+    """
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "この画像の内容を説明してください。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data.decode('latin1')}"
+                            }
+                        },
+                    ],
+                }
+            ],
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ 画像解析エラー: {e}")
+        return "⚠️ 画像解析に失敗しました"
