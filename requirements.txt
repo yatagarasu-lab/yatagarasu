@@ -1,4 +1,5 @@
-flask==2.3.3
+flask
+gunicorn
 line-bot-sdk
 python-dotenv
 dropbox
