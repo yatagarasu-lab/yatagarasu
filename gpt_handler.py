@@ -3,52 +3,52 @@ import io
 import openai
 import os
 
+# OpenAI APIキーの取得
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_bytes):
-    """ZIPファイルをGPTに解析させて要約する処理"""
-
-    # ZIP解凍
+def analyze_zip_content(zip_binary):
+    """ZIPファイルを解析し、含まれるテキストや画像を要約"""
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_file:
-            summaries = []
+        summary = ""
+        with zipfile.ZipFile(io.BytesIO(zip_binary)) as zf:
+            for file_info in zf.infolist():
+                filename = file_info.filename
 
-            for name in zip_file.namelist():
-                if name.endswith((".txt", ".csv", ".json", ".log")):
-                    with zip_file.open(name) as file:
-                        content = file.read().decode("utf-8", errors="ignore")
+                # テキストファイルを読み取り・要約
+                if filename.endswith(".txt"):
+                    with zf.open(file_info) as f:
+                        content = f.read().decode("utf-8", errors="ignore")
+                        summary += f"▼ {filename} の要約:\n"
+                        summary += gpt_summarize(content)
+                        summary += "\n\n"
 
-                        # GPTによる要約
-                        summary = call_gpt_summary(content, name)
-                        summaries.append(f"【{name}】\n{summary}\n")
+                # 画像ファイルも含まれていたらファイル名だけ列挙（今は要約しない）
+                elif filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    summary += f"📷 画像ファイル: {filename}\n"
 
-            if summaries:
-                return "\n".join(summaries)
-            else:
-                return "⚠️ ZIP内に解析対象ファイル（txt/csv/json/log）が見つかりませんでした。"
+        return summary.strip() or "ZIPファイルにテキストや画像が含まれていませんでした。"
 
     except Exception as e:
         return f"❌ ZIP解析エラー: {e}"
 
-def call_gpt_summary(text, filename=""):
-    """GPTにテキストを送って要約させる処理"""
-
-    prompt = f"""
-あなたはDropboxに保存されたスロットの分析データを読んで要点を抽出するAIです。
-ファイル名: {filename}
-内容の要点、傾向、注目すべき点を箇条書きで3〜5行で日本語でまとめてください。
-
-対象データ:
-{text[:3000]}  # 長すぎると失敗するので先頭のみ使う
-"""
-
+def gpt_summarize(text):
+    """与えられた長文をGPTで要約"""
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o",  # または gpt-3.5-turbo
-            messages=[{"role": "user", "content": prompt}],
+            model="gpt-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "以下のテキストを日本語で簡潔に要約してください。"
+                },
+                {
+                    "role": "user",
+                    "content": text[:3000]  # 入力制限
+                }
+            ],
+            max_tokens=1000,
             temperature=0.3,
         )
-        return response.choices[0].message["content"].strip()
-
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"❌ GPT解析失敗: {e}"
+        return f"（GPT要約失敗: {e}）"
