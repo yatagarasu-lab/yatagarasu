@@ -1,12 +1,25 @@
-# analyze_and_notify.py
+import dropbox
+import hashlib
 
-from gpt_handler import analyze_file_and_notify
-from dropbox_handler import list_files
+# アクセストークンをここに記載
+DROPBOX_ACCESS_TOKEN = "YOUR_ACCESS_TOKEN"
 
 def analyze_dropbox_updates():
+    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+
     folder_path = "/Apps/slot-data-analyzer"
-    files = list_files(folder_path)
-    
+    files = dbx.files_list_folder(folder_path).entries
+
+    seen_hashes = {}
     for file in files:
-        path = file.path_display
-        analyze_file_and_notify(path)
+        if isinstance(file, dropbox.files.FileMetadata):
+            content, _ = dbx.files_download(file.path_display)
+            file_bytes = content.content
+            file_hash = hashlib.md5(file_bytes).hexdigest()
+
+            if file_hash in seen_hashes:
+                print(f"重複ファイル削除: {file.path_display}")
+                dbx.files_delete_v2(file.path_display)
+            else:
+                seen_hashes[file_hash] = file.path_display
+                print(f"保存: {file.name}")
