@@ -1,24 +1,42 @@
-# line_push.py
-
 import os
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
+import requests
+from dotenv import load_dotenv
 
-def send_line_message(text):
-    if os.getenv("LINE_PUSH_ENABLED", "false").lower() != "true":
-        print("LINE通知は無効化されています。")
+# .env 読み込み
+load_dotenv()
+
+LINE_PUSH_ENABLED = os.getenv("LINE_PUSH_ENABLED", "false").lower() == "true"
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+def send_line_message(message):
+    if not LINE_PUSH_ENABLED:
+        print("🔕 LINE通知は無効化されています")
         return
 
-    access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    user_id = os.getenv("LINE_USER_ID")
-
-    if not access_token or not user_id:
-        print("LINE通知に必要な情報が不足しています。")
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("❌ LINEのアクセストークンまたはユーザーIDが未設定です")
         return
 
-    line_bot_api = LineBotApi(access_token)
-    try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=text))
-        print("LINEに通知を送信しました。")
-    except Exception as e:
-        print(f"LINE通知エラー: {e}")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {
+                "type": "text",
+                "text": message
+            }
+        ]
+    }
+
+    url = "https://api.line.me/v2/bot/message/push"
+    response = requests.post(url, headers=headers, json=data)
+
+    if response.status_code != 200:
+        print(f"❌ LINE通知失敗: {response.status_code} {response.text}")
+    else:
+        print("✅ LINE通知送信完了")
