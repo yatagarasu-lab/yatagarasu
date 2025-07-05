@@ -1,15 +1,12 @@
-from dropbox_utils import list_files, download_file
+# analyze_and_notify.py
+
 from gpt_handler import analyze_file_and_notify
-import time
+from dropbox_handler import list_files
 
 def analyze_dropbox_updates():
-    print("🔁 Dropbox更新を確認中...")
-    files = list_files("/Apps/slot-data-analyzer")
-
+    folder_path = "/Apps/slot-data-analyzer"
+    files = list_files(folder_path)
+    
     for file in files:
         path = file.path_display
-        content = download_file(path)
-        if content:
-            print(f"📁 処理中: {path}")
-            analyze_file_and_notify(path, content)
-            time.sleep(1)
+        analyze_file_and_notify(path)
