@@ -1,54 +1,54 @@
 import zipfile
 import io
-import openai
 import os
+import openai
 
-# OpenAI APIキーの取得
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_binary):
-    """ZIPファイルを解析し、含まれるテキストや画像を要約"""
+def analyze_zip_content(zip_bytes: bytes) -> str:
+    """
+    ZIPファイルの中身を解凍・要約し、GPTに渡して解析結果を返す
+    """
     try:
-        summary = ""
-        with zipfile.ZipFile(io.BytesIO(zip_binary)) as zf:
-            for file_info in zf.infolist():
-                filename = file_info.filename
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zip_file:
+            summaries = []
+            for filename in zip_file.namelist():
+                if filename.endswith((".txt", ".csv", ".json", ".md", ".log")):
+                    with zip_file.open(filename) as file:
+                        content = file.read().decode("utf-8", errors="ignore")
+                        summary = summarize_with_gpt(filename, content)
+                        summaries.append(f"📄 {filename}:\n{summary}\n")
+                else:
+                    summaries.append(f"📁 {filename}: （非対応ファイル）")
 
-                # テキストファイルを読み取り・要約
-                if filename.endswith(".txt"):
-                    with zf.open(file_info) as f:
-                        content = f.read().decode("utf-8", errors="ignore")
-                        summary += f"▼ {filename} の要約:\n"
-                        summary += gpt_summarize(content)
-                        summary += "\n\n"
+            return "\n".join(summaries) if summaries else "⚠️ ZIP内に対応ファイルが見つかりませんでした。"
 
-                # 画像ファイルも含まれていたらファイル名だけ列挙（今は要約しない）
-                elif filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    summary += f"📷 画像ファイル: {filename}\n"
+    except zipfile.BadZipFile:
+        return "❌ ZIPファイルの形式が正しくありません。"
 
-        return summary.strip() or "ZIPファイルにテキストや画像が含まれていませんでした。"
+def summarize_with_gpt(filename: str, content: str) -> str:
+    """
+    GPTでファイル内容を要約する
+    """
+    prompt = f"""
+以下はファイル「{filename}」の内容です。一言で要点をまとめてください。必要があれば詳細にも触れて構いません。
 
-    except Exception as e:
-        return f"❌ ZIP解析エラー: {e}"
+--- 内容開始 ---
+{content[:2000]}  # GPT-4は長文に対応していますが、制限付きで切り取っています
+--- 内容終了 ---
+"""
 
-def gpt_summarize(text):
-    """与えられた長文をGPTで要約"""
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {
-                    "role": "system",
-                    "content": "以下のテキストを日本語で簡潔に要約してください。"
-                },
-                {
-                    "role": "user",
-                    "content": text[:3000]  # 入力制限
-                }
+                {"role": "system", "content": "あなたはファイル要約の専門家です。"},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
-            temperature=0.3,
+            max_tokens=500,
+            temperature=0.5
         )
         return response.choices[0].message.content.strip()
+
     except Exception as e:
-        return f"（GPT要約失敗: {e}）"
+        return f"❌ 要約中にエラー発生: {e}"
