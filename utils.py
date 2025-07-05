@@ -1,22 +1,28 @@
-import dropbox
+import hashlib
 import os
-import openai
 
-DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# ハッシュを保存するファイル
+HASH_STORE_FILE = "processed_hashes.txt"
 
-def save_and_process_file(file_path, content):
-    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+def file_hash(content):
+    """ファイル内容のSHA256ハッシュを計算"""
+    return hashlib.sha256(content).hexdigest()
 
-    # ファイル保存
-    dbx.files_upload(content.encode(), file_path, mode=dropbox.files.WriteMode.overwrite)
+def is_duplicate(content):
+    """ファイルが既に処理済みかどうかをチェック"""
+    hash_val = file_hash(content)
 
-    # 内容の要約（OpenAIに送信）
-    summary = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "次のファイルの内容を要約してください。"},
-            {"role": "user", "content": content}
-        ]
-    )
+    if not os.path.exists(HASH_STORE_FILE):
+        return False
 
-    return summary['choices'][0]['message']['content']
+    with open(HASH_STORE_FILE, "r") as f:
+        hashes = f.read().splitlines()
+
+    return hash_val in hashes
+
+def save_hash(content):
+    """新しいファイルのハッシュを保存"""
+    hash_val = file_hash(content)
+
+    with open(HASH_STORE_FILE, "a") as f:
+        f.write(hash_val + "\n")
