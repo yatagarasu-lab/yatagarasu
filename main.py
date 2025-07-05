@@ -1,80 +1,48 @@
 import os
 import hashlib
-from io import BytesIO
+import dropbox
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
-import dropbox
+from linebot.models import MessageEvent, TextMessage
 import openai
-from PIL import Image
+from dotenv import load_dotenv
 
-app = Flask(__name__)
+# 環境変数の読み込み（.env対応）
+load_dotenv()
 
-# 環境変数からキー取得
+# 各種キーの取得
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-USER_ID = os.getenv("LINE_USER_ID")
+LINE_USER_ID = os.getenv("LINE_USER_ID")  # Push送信用
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# LINE設定
+# 各種インスタンス
+app = Flask(__name__)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Dropbox & GPT設定
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-openai.api_key = OPENAI_API_KEY
+# ルート確認用
+@app.route("/", methods=["GET"])
+def home():
+    return "LINE + Dropbox + GPT連携稼働中", 200
 
-# 重複チェック用
-file_hashes = set()
+# Dropbox Webhook（GET:確認用、POST:通知受付）
+@app.route("/webhook", methods=["GET", "POST"])
+def dropbox_webhook():
+    if request.method == "GET":
+        return request.args.get("challenge"), 200
+    elif request.method == "POST":
+        print("✅ Dropbox webhook received.")
+        process_latest_dropbox_file()
+        return "", 200
 
-def generate_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-def is_duplicate(content_hash):
-    if content_hash in file_hashes:
-        return True
-    file_hashes.add(content_hash)
-    return False
-
-def upload_to_dropbox(file_bytes, file_name):
-    path = f"/Apps/slot-data-analyzer/{file_name}"
-    dbx.files_upload(file_bytes, path, mode=dropbox.files.WriteMode.overwrite)
-    return path
-
-def analyze_with_gpt(file_bytes, is_image=True):
-    try:
-        if is_image:
-            # 画像のbase64形式をGPT Visionに送る
-            response = openai.chat.completions.create(
-                model="gpt-4-vision-preview",
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "この画像の内容を要約してください。"},
-                        {"type": "image_url", "image_url": {
-                            "url": "data:image/jpeg;base64," + file_bytes.encode("base64").decode()
-                        }}
-                    ]}
-                ],
-                max_tokens=300
-            )
-        else:
-            response = openai.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": file_bytes}],
-                max_tokens=300
-            )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"GPT解析エラー: {str(e)}"
-
-# 通知済み画像のID（まとめ通知のため）
-notified_ids = set()
-
-@app.route("/callback", methods=['POST'])
+# LINE Webhook（通常のメッセージ受信）
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
 
     try:
@@ -82,59 +50,75 @@ def callback():
     except InvalidSignatureError:
         abort(400)
 
-    return 'OK'
+    return "OK"
 
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_id = event.message.id
-
-    if message_id in notified_ids:
-        return  # すでに通知済み
-
-    notified_ids.add(message_id)
-
-    # 画像取得
-    message_content = line_bot_api.get_message_content(message_id)
-    image_data = BytesIO(message_content.content)
-    content = image_data.read()
-    hash_val = generate_hash(content)
-
-    if is_duplicate(hash_val):
-        return  # 重複なら何もしない
-
-    # Dropbox保存
-    file_name = f"{message_id}.jpg"
-    upload_to_dropbox(content, file_name)
-
-    # GPT解析（コメントアウトで無効化可能）
-    summary = analyze_with_gpt(content, is_image=True)
-
-    # 通知（1通）
-    line_bot_api.push_message(USER_ID, TextMessage(text="画像をDropboxに保存しました。ありがとうございます"))
-    if summary:
-        line_bot_api.push_message(USER_ID, TextMessage(text="要約: " + summary[:300]))
-
+# LINEメッセージ受信処理
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    text = event.message.text
-    if len(text) < 10:
-        line_bot_api.reply_message(event.reply_token, TextMessage(text="ありがとうございます"))
-        return
+def handle_message(event):
+    user_text = event.message.text
+    reply = "ありがとうございます"
+    line_bot_api.reply_message(event.reply_token, TextMessage(text=reply))
 
-    # 重複チェック
-    hash_val = generate_hash(text.encode())
-    if is_duplicate(hash_val):
-        return
+# Dropbox処理（ファイル解析 → GPT要約 → LINE通知）
+def process_latest_dropbox_file():
+    folder_path = "/Apps/slot-data-analyzer"
+    res = dbx.files_list_folder(folder_path)
+    files = sorted(res.entries, key=lambda x: x.server_modified, reverse=True)
 
-    # Dropbox保存
-    file_name = f"{event.message.id}.txt"
-    upload_to_dropbox(text.encode(), file_name)
+    for file in files:
+        if isinstance(file, dropbox.files.FileMetadata):
+            path = file.path_display
+            _, ext = os.path.splitext(path)
+            if ext.lower() in [".txt", ".md", ".log"]:  # 対象拡張子
+                _, res = dbx.files_download(path)
+                content = res.content.decode("utf-8")
 
-    # GPT解析（要約）
-    summary = analyze_with_gpt(text, is_image=False)
-    line_bot_api.push_message(USER_ID, TextMessage(text="テキストをDropboxに保存しました。ありがとうございます"))
-    if summary:
-        line_bot_api.push_message(USER_ID, TextMessage(text="要約: " + summary[:300]))
+                # 重複チェック（ハッシュ化で）
+                if is_duplicate(content):
+                    print("⚠️ 重複ファイル検出（スキップ）:", path)
+                    return
 
+                summary = ask_gpt(content)
+                message = f"📄 {file.name} の要約:\n\n{summary}"
+                push_line_message(message)
+                return
+    print("⚠️ 対象ファイルが見つかりません")
+
+# ハッシュで重複判定
+hash_memory = set()
+def is_duplicate(content):
+    h = hashlib.sha256(content.encode()).hexdigest()
+    if h in hash_memory:
+        return True
+    hash_memory.add(h)
+    return False
+
+# ChatGPTに要約依頼
+def ask_gpt(content):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{
+                "role": "system",
+                "content": "この文章を簡潔に要約してください。"
+            }, {
+                "role": "user",
+                "content": content
+            }],
+            max_tokens=300,
+        )
+        return response.choices[0].message["content"].strip()
+    except Exception as e:
+        return f"GPTエラー: {str(e)}"
+
+# LINEにPush通知
+def push_line_message(text):
+    try:
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=text))
+        print("✅ LINEへ送信完了")
+    except Exception as e:
+        print("❌ LINE送信エラー:", str(e))
+
+# アプリ起動
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
