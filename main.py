@@ -3,109 +3,96 @@ import hashlib
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 import dropbox
-import openai
-from datetime import datetime
+from io import BytesIO
 
-# Flaskアプリ設定
 app = Flask(__name__)
 
-# 環境変数取得
-CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-TARGET_FOLDER_PATH = os.environ.get("TARGET_FOLDER_PATH", "/Apps/slot-data-analyzer")
-LINE_USER_ID = os.environ.get("LINE_USER_ID")
+# LINEの環境変数
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# 各API初期化
-line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(CHANNEL_SECRET)
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-openai.api_key = OPENAI_API_KEY
+if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
+    raise Exception("LINE環境変数が正しく設定されていません。")
 
-# ファイル保存処理
-def save_to_dropbox(file_content, filename):
-    path = f"{TARGET_FOLDER_PATH}/{filename}"
-    dbx.files_upload(file_content, path, mode=dropbox.files.WriteMode.overwrite)
-    return path
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ファイルの重複チェック用ハッシュ生成
-def file_hash(data):
-    return hashlib.sha256(data).hexdigest()
+# Dropboxの環境変数
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
-# Dropbox内のファイルと重複判定
-def is_duplicate(new_data):
+if not DROPBOX_REFRESH_TOKEN or not DROPBOX_APP_KEY or not DROPBOX_APP_SECRET:
+    raise Exception("Dropboxの環境変数が正しく設定されていません。")
+
+# Dropbox接続
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
+
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+def is_duplicate(content, folder="/Apps/slot-data-analyzer"):
+    hash_new = file_hash(content)
     try:
-        files = dbx.files_list_folder(TARGET_FOLDER_PATH).entries
-        for f in files:
-            if isinstance(f, dropbox.files.FileMetadata):
-                _, res = dbx.files_download(f.path_display)
-                if file_hash(res.content) == file_hash(new_data):
-                    return True
-    except Exception:
-        pass
+        res = dbx.files_list_folder(folder)
+        for entry in res.entries:
+            metadata, response = dbx.files_download(entry.path_lower)
+            existing_content = response.content
+            if file_hash(existing_content) == hash_new:
+                return True
+    except dropbox.exceptions.ApiError as e:
+        print(f"Dropbox APIエラー: {e}")
     return False
 
-# GPT解析処理
-def analyze_with_gpt(content):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下の内容がスロットかパチンコに関係する場合はA（スロット）、B（パチンコ）、それ以外はCとだけ返してください。"},
-                {"role": "user", "content": content}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"解析失敗: {e}"
+@app.route("/")
+def health_check():
+    return "OK", 200
 
-# LINEのWebhook受信
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get("X-Line-Signature")
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+
     return 'OK'
 
-# メッセージイベント処理
 @handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    content = event.message.text.encode('utf-8')
-    classification = analyze_with_gpt(content.decode("utf-8"))
+def handle_text(event):
+    user_message = event.message.text
+    reply = "ありがとうございます"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-    if classification == "A" or classification == "B":
-        filename = f"text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        save_to_dropbox(content, filename)
-        if event.source.user_id == LINE_USER_ID:
-            line_bot_api.push_message(LINE_USER_ID, TextMessage(text="ありがとうございます"))
-    else:
-        # スロパチ以外 → 無視
-        pass
-
-# 画像イベント処理
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-    image_data = message_content.content
+def handle_image(event):
+    message_id = event.message.id
+    content = line_bot_api.get_message_content(message_id)
+    image_data = BytesIO(content.content)
 
-    if is_duplicate(image_data):
-        return  # 重複なら保存せず終了
+    # 重複チェック
+    if is_duplicate(image_data.getvalue()):
+        print("重複画像：保存スキップ")
+        return
 
-    classification = analyze_with_gpt("これはスロットまたはパチンコの画像ですか？")
+    filename = f"/Apps/slot-data-analyzer/{message_id}.jpg"
+    dbx.files_upload(image_data.getvalue(), filename)
+    print(f"画像保存完了: {filename}")
 
-    if classification == "A" or classification == "B":
-        filename = f"image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        save_to_dropbox(image_data, filename)
-        if event.source.user_id == LINE_USER_ID:
-            line_bot_api.push_message(LINE_USER_ID, TextMessage(text="ありがとうございます"))
+    # LINE通知
+    line_bot_api.push_message(
+        LINE_USER_ID,
+        TextSendMessage(text="画像をDropboxに保存しました。ありがとうございます")
+    )
 
-# 起動用
 if __name__ == "__main__":
     app.run()
