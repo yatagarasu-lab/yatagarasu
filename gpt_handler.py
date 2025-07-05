@@ -1,69 +1,39 @@
 import zipfile
-import io
-import base64
-from openai import OpenAI
+import openai
 import os
+from io import BytesIO
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_zip_content(zip_data):
+def analyze_zip_content(zip_data: bytes) -> str:
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-            results = []
+        result_summary = []
 
-            for name in z.namelist():
-                if name.lower().endswith((".png", ".jpg", ".jpeg")):
-                    image_bytes = z.read(name)
-                    result = analyze_image(image_bytes, name)
-                    results.append(f"🖼️ {name}:\n{result}")
-                elif name.lower().endswith(".txt"):
-                    text_data = z.read(name).decode("utf-8", errors="ignore")
-                    result = analyze_text(text_data, name)
-                    results.append(f"📄 {name}:\n{result}")
-                else:
-                    results.append(f"⛔ 未対応ファイル: {name}")
+        with zipfile.ZipFile(BytesIO(zip_data)) as zip_file:
+            for file_info in zip_file.infolist():
+                if file_info.filename.endswith(".txt"):
+                    with zip_file.open(file_info.filename) as f:
+                        content = f.read().decode("utf-8", errors="ignore")
+                        summary = summarize_text(content, file_info.filename)
+                        result_summary.append(summary)
 
-            return "\n\n".join(results)
+        return "\n\n".join(result_summary)
 
     except Exception as e:
-        return f"❌ ZIP解析エラー: {e}"
+        return f"ZIP解析中にエラーが発生しました: {e}"
 
-def analyze_image(image_bytes, name):
+def summarize_text(text: str, filename: str) -> str:
     try:
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
-        response = client.chat.completions.create(
-            model="gpt-4o",
+        response = openai.ChatCompletion.create(
+            model="gpt-4-1106-preview",  # 必要に応じて変更可能
             messages=[
-                {"role": "system", "content": "あなたはスロット台の設定をグラフ画像から予想するアナリストです。"},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            },
-                        },
-                        {"type": "text", "text": f"この画像（{name}）から設定を予測してください。"}
-                    ]
-                },
+                {"role": "system", "content": "あなたは要約のプロです。内容をできる限り簡潔にわかりやすく要約してください。"},
+                {"role": "user", "content": f"次のテキストファイル（{filename}）の要約をお願いします:\n\n{text[:4000]}"}
             ],
-            max_tokens=1000,
+            temperature=0.3,
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"画像解析エラー: {e}"
+        summary = response.choices[0].message.content.strip()
+        return f"🗂 {filename} の要約:\n{summary}"
 
-def analyze_text(text_data, name):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "あなたはスロットイベントの報告書から設定傾向を予測する専門家です。"},
-                {"role": "user", "content": f"{name} の内容:\n{text_data}\n\nこの内容から得られる設定傾向を分析してください。"}
-            ],
-            max_tokens=1500,
-        )
-        return response.choices[0].message.content
     except Exception as e:
-        return f"テキスト解析エラー: {e}"
+        return f"要約エラー（{filename}）: {e}"
