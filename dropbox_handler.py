@@ -1,28 +1,24 @@
-import os
-import dropbox
-from hashlib import md5
-from datetime import datetime
+def file_hash(content):
+    return md5(content).hexdigest()
 
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-def list_files(folder_path=DROPBOX_FOLDER_PATH):
-    files = []
+def delete_file(path):
     try:
-        result = dbx.files_list_folder(folder_path)
-        files.extend(result.entries)
-        while result.has_more:
-            result = dbx.files_list_folder_continue(result.cursor)
-            files.extend(result.entries)
+        dbx.files_delete_v2(path)
+        print(f"[delete_file] Deleted: {path}")
     except Exception as e:
-        print(f"[list_files] Error: {e}")
-    return files
+        print(f"[delete_file] Error: {e}")
 
-def download_file(path):
-    try:
-        metadata, res = dbx.files_download(path)
-        return res.content
-    except Exception as e:
-        print(f"[download_file] Error: {e}")
-        return None
+def find_duplicates(folder_path=DROPBOX_FOLDER_PATH):
+    files = list_files(folder_path)
+    hash_map = {}
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        if content is None:
+            continue
+        hash_value = file_hash(content)
+        if hash_value in hash_map:
+            print(f"[find_duplicates] Duplicate found: {path} (same as {hash_map[hash_value]})")
+            delete_file(path)
+        else:
+            hash_map[hash_value] = path
