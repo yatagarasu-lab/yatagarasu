@@ -9,6 +9,7 @@ from openai import OpenAI
 from analyze_file import analyze_file
 from line_push import send_line_message
 from hash_util import is_duplicate, save_hash
+from datetime import datetime
 
 # --- 各種キー ---
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
@@ -44,26 +45,53 @@ def callback():
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # ✅ Dropboxのchallenge応答（初回確認用）
     if request.method == "GET":
         challenge = request.args.get("challenge")
-        if challenge:
-            return challenge, 200  # Dropboxが期待する応答
-        return "Missing challenge", 400
+        return challenge if challenge else "Missing challenge", 200 if challenge else 400
 
-    # ✅ POSTリクエスト（ファイル更新通知）
     if request.method == "POST":
         print("✅ Dropbox Webhook POST received!")
+
+        try:
+            # 🔍 最新ファイル取得
+            entries = dbx.files_list_folder("/Apps/slot-data-analyzer").entries
+            latest_file = max(entries, key=lambda f: f.client_modified)
+
+            _, ext = os.path.splitext(latest_file.name)
+            if ext.lower() not in [".jpg", ".jpeg", ".png"]:
+                print("⚠️ 画像ファイルではないためスキップ")
+                return "", 200
+
+            # 📥 ダウンロード
+            metadata, res = dbx.files_download(latest_file.path_display)
+            file_data = res.content
+
+            # ✅ 重複チェック
+            if is_duplicate(file_data):
+                send_line_message(USER_ID, f"⚠️ 自動処理スキップ：{latest_file.name}（重複）")
+                return "", 200
+            save_hash(file_data)
+
+            # 📝 ローカル保存して解析
+            local_path = f"/tmp/{latest_file.name}"
+            with open(local_path, "wb") as f:
+                f.write(file_data)
+
+            result = analyze_file(local_path)
+            if not result:
+                raise ValueError("解析結果が空です。")
+            send_line_message(USER_ID, f"✅ 自動解析完了: {latest_file.name}\n\n{result[:300]}...")
+        except Exception as e:
+            send_line_message(USER_ID, f"⚠️ Webhook自動解析エラー: {e}")
         return "", 200
 
-# --- 画像受信イベント処理 ---
+# --- LINE画像受信処理 ---
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
     message_id = event.message.id
     message_content = line_bot_api.get_message_content(message_id)
     file_data = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
 
-    # ✅ 重複チェック
     if is_duplicate(file_data):
         send_line_message(USER_ID, "⚠️ この画像はすでに処理済みです。")
         return
@@ -73,10 +101,8 @@ def handle_image(event):
     filename = f"{file_hash_val}.jpg"
     dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
 
-    # Dropboxにアップロード
     dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-    # ローカル保存 → 解析
     local_path = f"/tmp/{filename}"
     with open(local_path, "wb") as f:
         f.write(file_data)
@@ -89,11 +115,11 @@ def handle_image(event):
     except Exception as e:
         send_line_message(USER_ID, f"⚠️ 解析エラー: {e}")
 
-# --- テキスト受信イベント処理 ---
+# --- LINEテキスト受信処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
     received_text = event.message.text
-    send_line_message(USER_ID, f"ありがとうございます。受信した内容：{received_text}")
+    send_line_message(USER_ID, f"ありがとうございます。受信内容：{received_text}")
 
 # --- 起動 ---
 if __name__ == "__main__":
