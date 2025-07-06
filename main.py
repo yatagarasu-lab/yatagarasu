@@ -6,9 +6,9 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, ImageMessage
 import dropbox
 from openai import OpenAI
-from analyze_file import analyze_file  # 独自のファイル解析スクリプト
-from line_push import send_line_message  # LINE通知用関数
-from hash_util import is_duplicate, save_hash  # ✅ 重複チェック機能を追加
+from analyze_file import analyze_file
+from line_push import send_line_message
+from hash_util import is_duplicate, save_hash
 
 # --- 各種キー ---
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
@@ -47,12 +47,11 @@ def callback():
 def handle_image(event):
     message_id = event.message.id
     message_content = line_bot_api.get_message_content(message_id)
-
     file_data = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
 
     # ✅ 重複チェック
     if is_duplicate(file_data):
-        send_line_message("⚠️ この画像はすでに処理済みです。")
+        send_line_message("⚠️ この画像はすでに処理済みです。", USER_ID)
         return
     save_hash(file_data)
 
@@ -68,15 +67,21 @@ def handle_image(event):
     with open(local_path, "wb") as f:
         f.write(file_data)
 
-    result = analyze_file(local_path)
-    send_line_message(f"✅ 解析完了: {filename}\n\n{result[:300]}...")
+    try:
+        result = analyze_file(local_path)
+        if not result:
+            raise ValueError("解析結果が空です。")
+        send_line_message(f"✅ 解析完了: {filename}\n\n{result[:300]}...", USER_ID)
+    except Exception as e:
+        send_line_message(f"⚠️ 解析エラー: {e}", USER_ID)
 
 # --- テキスト受信イベント処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
     received_text = event.message.text
-    send_line_message(f"ありがとうございます。受信した内容：{received_text}")
+    send_line_message(f"ありがとうございます。受信した内容：{received_text}", USER_ID)
 
 # --- 起動 ---
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
