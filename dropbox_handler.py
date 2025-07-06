@@ -1,55 +1,65 @@
+import dropbox
 import os
-import json
-from dropbox import Dropbox
-from analyze_file import analyze_file
+from gpt_analyzer import analyze_file_and_notify, file_hash
 from line_push import send_line_message
-from utils import is_duplicate, save_hash
-from dotenv import load_dotenv
 
-load_dotenv()
+# 環境変数から取得（Renderに設定）
+DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET")
 
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-MONITOR_FOLDER = os.getenv("DROPBOX_MONITOR_FOLDER", "/Apps/slot-data-analyzer")
+# アクセストークンを取得
+def get_access_token():
+    from requests.auth import HTTPBasicAuth
+    import requests
 
-dbx = Dropbox(DROPBOX_ACCESS_TOKEN)
+    url = "https://api.dropboxapi.com/oauth2/token"
+    headers = {}
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+    }
+    auth = HTTPBasicAuth(DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
 
-def handle_dropbox_webhook(request):
-    body = json.loads(request.data.decode("utf-8"))
+    response = requests.post(url, headers=headers, data=data, auth=auth)
+    return response.json().get("access_token")
 
-    for account in body.get("list_folder", {}).get("accounts", []):
-        print(f"📥 更新を検知したアカウント: {account}")
-        process_recent_files()
+# Dropboxインスタンス生成
+def get_dropbox_client():
+    token = get_access_token()
+    return dropbox.Dropbox(token)
 
-def process_recent_files():
-    try:
-        entries = dbx.files_list_folder(MONITOR_FOLDER, recursive=False).entries
-    except Exception as e:
-        print(f"❌ Dropboxフォルダ読み込み失敗: {e}")
-        return
+# フォルダ内のファイル一覧取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
 
-    for entry in entries:
-        if hasattr(entry, "path_lower") and not entry.name.startswith("."):
-            file_path = entry.path_display
-            print(f"🔍 ファイル検出: {file_path}")
+# ファイルをダウンロード
+def download_file(path):
+    dbx = get_dropbox_client()
+    metadata, res = dbx.files_download(path)
+    return res.content
 
-            # 重複チェック
-            content, res = None, None
-            try:
-                _, res = dbx.files_download(file_path)
-                content = res.content
-            except Exception as e:
-                print(f"❌ ダウンロード失敗: {e}")
-                continue
+# Webhook受信時のイベント処理
+def handle_dropbox_event():
+    folder_path = "/Apps/slot-data-analyzer"
+    files = list_files(folder_path)
+    seen_hashes = {}
 
-            if is_duplicate(content):
-                print(f"⚠️ 重複ファイル: {file_path}")
-                continue
+    for file in files:
+        try:
+            path = file.path_display
+            content = download_file(path)
+            hash_value = file_hash(content)
+
+            # 重複ファイルチェック
+            if hash_value in seen_hashes:
+                dbx = get_dropbox_client()
+                dbx.files_delete_v2(path)
+                send_line_message(f"🗑️ 重複ファイルを削除しました: {path}")
             else:
-                save_hash(content)
-
-            try:
-                result = analyze_file(file_path)
-                if os.getenv("LINE_PUSH_ENABLED", "true").lower() == "true":
-                    send_line_message(f"✅ 解析完了: {os.path.basename(file_path)}\n\n{result[:300]}...")
-            except Exception as e:
-                print(f"❌ ファイル解析エラー: {e}")
+                seen_hashes[hash_value] = path
+                analyze_file_and_notify(path, content)
+        except Exception as e:
+            send_line_message(f"⚠️ Dropbox処理でエラー: {e}")
