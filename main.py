@@ -1,71 +1,50 @@
-from flask import Flask, request, abort
-import os
-import json
-import dropbox
+from flask import Flask, request, jsonify
 import requests
-import hashlib
-import time
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+import os
 
 app = Flask(__name__)
 
-# LINE設定
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# ▼ Dropboxのアプリキー、シークレット、リフレッシュトークン（環境変数で管理推奨）
+APP_KEY = os.getenv("DROPBOX_APP_KEY", "YOUR_APP_KEY")
+APP_SECRET = os.getenv("DROPBOX_APP_SECRET", "YOUR_APP_SECRET")
+REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN", "YOUR_REFRESH_TOKEN")
 
-# Dropbox設定（リフレッシュ対応）
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_ACCESS_TOKEN = None  # 初期状態
-
-def refresh_dropbox_token():
-    global DROPBOX_ACCESS_TOKEN
-    url = "https://api.dropboxapi.com/oauth2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_APP_KEY,
-        "client_secret": DROPBOX_APP_SECRET,
-    }
-    response = requests.post(url, data=data)
-    if response.status_code == 200:
-        DROPBOX_ACCESS_TOKEN = response.json()["access_token"]
-        print("✅ Dropboxトークンを更新しました。")
-    else:
-        print("❌ Dropboxトークンの更新に失敗しました。", response.text)
-
-# 最初に1回トークン更新
-refresh_dropbox_token()
-
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return "✅ Slot Data Analyzer Bot is running."
+    return "LINE×Dropbox GPTサーバー起動中"
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    # Dropboxのチャレンジ検証（GET）
-    if request.method == "GET":
-        challenge = request.args.get("challenge")
-        return challenge, 200
-
-    # LINEからのPOST受信処理
-    signature = request.headers.get("X-Line-Signature")
-    body = request.get_data(as_text=True)
-
+# ▼ Dropboxのrefresh_tokenが有効か確認するエンドポイント
+@app.route("/check_token", methods=["GET"])
+def check_token():
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
+        response = requests.post(
+            "https://api.dropboxapi.com/oauth2/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": REFRESH_TOKEN
+            },
+            auth=(APP_KEY, APP_SECRET)
+        )
 
-    return "OK"
+        if response.status_code == 200:
+            access_token = response.json().get("access_token")
+            return jsonify({
+                "status": "valid",
+                "message": "✅ refresh_token は有効です",
+                "access_token": access_token
+            }), 200
+        else:
+            return jsonify({
+                "status": "invalid",
+                "message": "❌ refresh_token が無効です",
+                "error": response.json()
+            }), 401
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    user_message = event.message.text
-    reply_text = "ありがとうございます"
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": "⚠️ チェック中にエラーが発生しました",
+            "details": str(e)
+        }), 500
+
+# 既存の他のエンドポイント（/webhook など）があればここに追記
