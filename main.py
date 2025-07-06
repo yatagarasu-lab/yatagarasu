@@ -132,3 +132,6 @@ def callback():
 
 if __name__ == "__main__":
     app.run()
+    @app.route('/')
+def index():
+    return 'Slot Data Analyzer is Running.'
