@@ -1,137 +1,63 @@
 import os
 import hashlib
-import json
-import requests
-from flask import Flask, request, abort
+import dropbox
+from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import TextSendMessage
-import dropbox
-from openai import OpenAI
 
+# 環境変数取得
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+# 環境変数の確認（なければログ表示して終了）
+if not all([DROPBOX_ACCESS_TOKEN, LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, LINE_USER_ID]):
+    raise EnvironmentError("環境変数が未設定です。Renderの環境変数に設定してください。")
+
+# 各種初期化
 app = Flask(__name__)
-
-# 環境変数
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-DROPBOX_ACCESS_TOKEN = os.environ.get('DROPBOX_ACCESS_TOKEN')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-LINE_USER_ID = os.environ.get('LINE_USER_ID')
-
-# LINE Bot 設定
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Dropbox クライアント
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+# ファイルのハッシュを計算して重複判定に使う
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
 
-# OpenAI クライアント
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-@app.route('/')
-def home():
-    return 'Dropbox × LINE × GPT 完全自動連携システム 起動中'
-
-# Dropbox Webhook 用エンドポイント
-@app.route('/dropbox-webhook', methods=['GET', 'POST'])
-def dropbox_webhook():
-    if request.method == 'GET':
-        return request.args.get('challenge')
-    elif request.method == 'POST':
-        process_dropbox_files()
-        return '', 200
-    else:
-        abort(400)
-
+# Dropboxのファイル一覧を取得
 def list_files(folder_path="/Apps/slot-data-analyzer"):
     result = dbx.files_list_folder(folder_path)
     return result.entries
 
+# Dropboxのファイルをダウンロード
 def download_file(path):
-    _, res = dbx.files_download(path)
+    metadata, res = dbx.files_download(path)
     return res.content
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
-
-def is_duplicate(new_content, existing_files):
-    new_hash = file_hash(new_content)
-    for file in existing_files:
-        if file_hash(download_file(file.path_display)) == new_hash:
-            return file
-    return None
-
-def process_dropbox_files():
-    folder_path = "/Apps/slot-data-analyzer"
+# 重複ファイルを削除
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
     files = list_files(folder_path)
-    existing = {file.path_display: download_file(file.path_display) for file in files}
+    hash_map = {}
 
     for file in files:
         path = file.path_display
-        content = existing[path]
+        content = download_file(path)
+        hash_value = file_hash(content)
 
-        duplicate = is_duplicate(content, files)
-        if duplicate and duplicate.path_display != path:
+        if hash_value in hash_map:
+            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
             dbx.files_delete_v2(path)
-            notify_line(f"重複ファイルを削除しました:\n{path}")
-            continue
+        else:
+            hash_map[hash_value] = path
 
-        try:
-            result = analyze_with_gpt(content)
-            notify_line(f"📦ファイル解析完了: {path}\n\n📝解析結果:\n{result}")
-        except Exception as e:
-            notify_line(f"❌解析エラー: {e}")
+# Webhook受信時の処理
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    find_duplicates()  # ファイル整理処理を追加
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="ありがとうございます"))
+    return "OK", 200
 
-def analyze_with_gpt(content):
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "これはDropboxに保存されたファイルの内容です。重要な情報を要約し、スロットやパチンコの設定・傾向・特徴を中心に分析してください。"},
-            {"role": "user", "content": content.decode("utf-8", errors="ignore")}
-        ]
-    )
-    return response.choices[0].message.content.strip()
-
-def notify_line(message):
-    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
-
-# Dropbox OAuth2 Callback（リフレッシュトークン取得）
-@app.route('/oauth2/callback')
-def oauth2_callback():
-    code = request.args.get('code')
-    if not code:
-        return '認証コードが見つかりませんでした。'
-
-    token_url = "https://api.dropboxapi.com/oauth2/token"
-    data = {
-        'code': code,
-        'grant_type': 'authorization_code',
-        'client_id': os.environ['DROPBOX_APP_KEY'],
-        'client_secret': os.environ['DROPBOX_APP_SECRET'],
-        'redirect_uri': 'https://slot-data-analyzer.onrender.com/oauth2/callback'
-    }
-
-    response = requests.post(token_url, data=data)
-    if response.status_code == 200:
-        tokens = response.json()
-        access_token = tokens.get('access_token')
-        refresh_token = tokens.get('refresh_token')
-        return f"✅ アクセストークン: {access_token}<br>🔄 リフレッシュトークン: {refresh_token}"
-    else:
-        return f"❌ トークン取得失敗: {response.text}"
-
-# LINE Webhook エンドポイント（メッセージ受付）
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers['X-Line-Signature']
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        abort(400)
-    return 'OK'
-
+# Render起動用
 if __name__ == "__main__":
     app.run()
-    @app.route('/')
-def index():
-    return 'Slot Data Analyzer is Running.'
