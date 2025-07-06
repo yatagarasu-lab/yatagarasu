@@ -1,9 +1,9 @@
-from flask import Flask
+from flask import Flask, request
+
 app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return "✅ 動作確認OK！Flaskアプリが起動しています。"
+    return "✅ Flaskアプリは正常に動作しています！"
 
-if __name__ == "__main__":
-    app.run()
+# 既存のWebhookやPush処理などもこの下に書かれているはずです
