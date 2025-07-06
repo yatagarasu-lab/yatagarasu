@@ -3,11 +3,10 @@ import hashlib
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 import dropbox
 from openai import OpenAI
 from analyze_file import analyze_file
-from line_push import send_line_message
 from hash_util import is_duplicate, save_hash
 
 # --- 各種キー ---
@@ -32,36 +31,30 @@ def index():
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature", "")
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-
-    print("[📥 Webhook受信] 署名:", signature)
-    print("[📥 Webhook受信] 本文:", body)
 
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError as e:
-        print("[❌ Webhookエラー] 署名不正:", e)
+    except InvalidSignatureError:
         abort(400)
-    except Exception as e:
-        print("[❌ Webhookエラー] 予期しない例外:", e)
-        abort(500)
 
     return "OK"
+
+# --- LINEメッセージ送信 ---
+def send_line_message(user_id, message):
+    line_bot_api.push_message(user_id, TextSendMessage(text=message))
 
 # --- 画像受信イベント処理 ---
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
-    print("[🖼️ イベント] 画像を受信")
-
     message_id = event.message.id
     message_content = line_bot_api.get_message_content(message_id)
     file_data = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
 
     # ✅ 重複チェック
     if is_duplicate(file_data):
-        print("[⚠️ 重複検出] 同一画像は処理しない")
-        send_line_message("⚠️ この画像はすでに処理済みです。", USER_ID)
+        send_line_message(USER_ID, "⚠️ この画像はすでに処理済みです。")
         return
     save_hash(file_data)
 
@@ -72,36 +65,26 @@ def handle_image(event):
     try:
         # Dropboxにアップロード
         dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-        print(f"[✅ Dropbox] アップロード成功: {dropbox_path}")
-    except Exception as e:
-        print(f"[❌ Dropboxアップロード失敗] {e}")
-        send_line_message(f"⚠️ Dropboxアップロードエラー: {e}", USER_ID)
-        return
 
-    # ローカル保存 → 解析
-    local_path = f"/tmp/{filename}"
-    with open(local_path, "wb") as f:
-        f.write(file_data)
+        # ローカル保存 → 解析
+        local_path = f"/tmp/{filename}"
+        with open(local_path, "wb") as f:
+            f.write(file_data)
 
-    try:
-        print("[🔍 解析] OpenAIで画像解析を実行")
         result = analyze_file(local_path)
         if not result:
             raise ValueError("解析結果が空です。")
-        send_line_message(f"✅ 解析完了: {filename}\n\n{result[:300]}...", USER_ID)
+        send_line_message(USER_ID, f"✅ 解析完了: {filename}\n\n{result[:300]}...")
     except Exception as e:
-        print(f"[❌ 解析エラー] {e}")
-        send_line_message(f"⚠️ 解析エラー: {e}", USER_ID)
+        send_line_message(USER_ID, f"⚠️ 解析エラー: {e}")
 
 # --- テキスト受信イベント処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
     received_text = event.message.text
-    print(f"[💬 テキスト受信] 内容: {received_text}")
-    send_line_message(f"ありがとうございます。受信した内容：{received_text}", USER_ID)
+    send_line_message(USER_ID, f"ありがとうございます。受信した内容：{received_text}")
 
 # --- 起動 ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"[🚀 起動] Flaskサーバーをポート{port}で起動中...")
     app.run(host="0.0.0.0", port=port)
