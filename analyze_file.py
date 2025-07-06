@@ -1,31 +1,37 @@
-import os
+import mimetypes
 from openai import OpenAI
-from dotenv import load_dotenv
+import os
 
-load_dotenv()
-
-# OpenAIクライアントの初期化（proxiesを除外）
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def analyze_file(file_path):
-    try:
-        # ファイル内容を読み込む（テキスト or OCR前提）
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
+    mime_type, _ = mimetypes.guess_type(file_path)
+    file_name = os.path.basename(file_path)
 
-        # OpenAI API に送信して解析（例: GPT-4oを使う）
-        response = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
-            messages=[
-                {"role": "system", "content": "あなたは画像や文章を解析するAIアシスタントです。"},
-                {"role": "user", "content": "次のファイルを読み取り、要約してください。"},
-                {"role": "user", "content": file_bytes.decode("utf-8", errors="ignore")},
-            ],
-            temperature=0.3
-        )
+    if mime_type and mime_type.startswith("image/"):
+        # 画像ファイルの場合 → ChatGPT Visionを使う
+        with open(file_path, "rb") as image_file:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "あなたはパチスロの設定判別を支援するAIです。画像内のスランプグラフや文字情報を読み取り、設定の傾向を分析してください。"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_file.read().encode('base64').decode()}",
+                                    "detail": "high"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=1000,
+            )
+        return response.choices[0].message.content.strip()
 
-        # 応答を取得
-        return response.choices[0].message.content
-
-    except Exception as e:
-        return f"解析中にエラーが発生しました: {e}"
+    else:
+        # その他ファイル（例：PDF、テキスト）はプレーンテキストとして処理（必要なら後日対応）
+        return f"{file_name} は画像ではありません。現在、画像のみ解析に対応しています。"
