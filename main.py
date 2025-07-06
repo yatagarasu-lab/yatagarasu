@@ -86,3 +86,13 @@ def webhook():
     final_report = "\n\n".join(summary_report) if summary_report else "変更が検出されましたが、処理対象はありませんでした。"
     send_line_message(final_report[:499])  # LINE制限対策
     return "OK", 200
+    from flask import Flask, request
+import os
+
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "✅ GPT×Dropbox×LINE Bot は起動中です", 200
+
+# ここに他のWebhook処理などが続くはず…
