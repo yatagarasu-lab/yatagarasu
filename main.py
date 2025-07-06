@@ -8,6 +8,7 @@ import dropbox
 from openai import OpenAI
 from analyze_file import analyze_file  # 独自のファイル解析スクリプト
 from line_push import send_line_message  # LINE通知用関数
+from hash_util import is_duplicate, save_hash  # ✅ 重複チェック機能を追加
 
 # --- 各種キー ---
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
@@ -20,7 +21,7 @@ USER_ID = os.environ.get("LINE_USER_ID")
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-openai = OpenAI(api_key=OPENAI_API_KEY)  # proxies は削除！
+openai = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- Flask アプリ ---
 app = Flask(__name__)
@@ -41,21 +42,28 @@ def callback():
 
     return "OK"
 
-# --- 画像・テキスト受信イベント処理 ---
+# --- 画像受信イベント処理 ---
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
     message_id = event.message.id
     message_content = line_bot_api.get_message_content(message_id)
 
     file_data = b"".join(chunk for chunk in message_content.iter_content(chunk_size=1024))
-    file_hash = hashlib.md5(file_data).hexdigest()
-    filename = f"{file_hash}.jpg"
+
+    # ✅ 重複チェック
+    if is_duplicate(file_data):
+        send_line_message("⚠️ この画像はすでに処理済みです。")
+        return
+    save_hash(file_data)
+
+    file_hash_val = hashlib.md5(file_data).hexdigest()
+    filename = f"{file_hash_val}.jpg"
     dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
 
     # Dropboxにアップロード
     dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-    # ファイル解析
+    # ローカル保存 → 解析
     local_path = f"/tmp/{filename}"
     with open(local_path, "wb") as f:
         f.write(file_data)
@@ -63,6 +71,7 @@ def handle_image(event):
     result = analyze_file(local_path)
     send_line_message(f"✅ 解析完了: {filename}\n\n{result[:300]}...")
 
+# --- テキスト受信イベント処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
     received_text = event.message.text
