@@ -1,99 +1,87 @@
 import os
 import hashlib
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, ImageMessage, TextSendMessage
+from openai import OpenAI
 import dropbox
-from flask import Flask, request
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
 
-# LINE設定
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-
-# Dropbox設定
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
-
-# Flask初期化
 app = Flask(__name__)
 
-# ファイルのSHA256ハッシュを取得（重複検出用）
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+# 環境変数の取得
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"  # ← 固定ユーザーID
 
-# Dropbox内のファイル一覧を取得
-def list_files(folder_path):
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+# 各種APIクライアントの設定
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+client = OpenAI(api_key=OPENAI_API_KEY)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# ファイルをダウンロード
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content
+def save_to_dropbox(file_content, filename):
+    dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
+    dbx.files_upload(file_content, dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+    return dropbox_path
 
-# 重複ファイルを削除
-def remove_duplicates():
-    files = list_files(DROPBOX_FOLDER_PATH)
-    hash_map = {}
-    removed_files = []
+def analyze_with_gpt(image_bytes):
+    response = client.chat.completions.create(
+        model="gpt-4-vision-preview",
+        messages=[
+            {"role": "user", "content": [
+                {"type": "text", "text": "以下の画像を解析して結果を要約してください。"},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/jpeg;base64," + image_bytes.decode("utf-8")}}
+            ]}
+        ],
+        max_tokens=1000
+    )
+    return response.choices[0].message.content
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            dbx.files_delete_v2(path)
-            removed_files.append(path)
-        else:
-            hash_map[hash_value] = path
-
-    return removed_files
-
-# LINE通知送信
-def send_line_message(text):
-    try:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
-    except Exception as e:
-        print("LINE通知エラー:", e)
-
-# Dropbox Webhook
-@app.route("/webhook", methods=["GET", "POST"])
-def dropbox_webhook():
-    if request.method == "GET":
-        challenge = request.args.get("challenge")
-        if challenge:
-            return challenge, 200
-        return "Missing challenge", 400
-
-    if request.method == "POST":
-        print("✅ Dropbox Webhook POST received!")
-        removed = remove_duplicates()
-
-        if removed:
-            message = f"🧹 重複ファイルを削除しました:\n" + "\n".join(removed)
-        else:
-            message = "🔍 重複ファイルは見つかりませんでした。"
-
-        send_line_message(message)
-        return "", 200
-
-# LINE Bot Webhook（メッセージ受信確認用）
 @app.route("/callback", methods=["POST"])
-def line_callback():
+def callback():
+    body = request.get_data(as_text=True)
+    signature = request.headers["X-Line-Signature"]
+
     try:
-        body = request.get_data(as_text=True)
-        print("🔔 LINEからメッセージを受信:", body)
-        return "OK", 200
+        events = handler.parser.parse(body, signature)
     except Exception as e:
-        print("LINE Webhook エラー:", e)
-        return "Error", 500
+        print(f"Signature validation failed: {e}")
+        abort(400)
 
-# 起動確認
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running", 200
+    for event in events:
+        if isinstance(event, MessageEvent) and isinstance(event.message, ImageMessage):
+            # 一時ファイルとして保存
+            message_id = event.message.id
+            message_content = line_bot_api.get_message_content(message_id)
 
-if __name__ == "__main__":
-    app.run(debug=True)
+            image_data = b""
+            for chunk in message_content.iter_content():
+                image_data += chunk
+
+            filename = f"{message_id}.jpg"
+            save_to_dropbox(image_data, filename)
+
+            # ① 受信直後に通知
+            line_bot_api.push_message(
+                USER_ID,
+                TextSendMessage(text="画像を受け取りました。解析中です。")
+            )
+
+            # ② GPTで解析
+            import base64
+            encoded = base64.b64encode(image_data)
+            try:
+                result = analyze_with_gpt(encoded)
+            except Exception as e:
+                result = f"解析中にエラーが発生しました: {e}"
+
+            # ③ 結果を通知
+            line_bot_api.push_message(
+                USER_ID,
+                TextSendMessage(text="解析が完了しました。ありがとうございます！\n\n" + result)
+            )
+
+    return "OK", 200
