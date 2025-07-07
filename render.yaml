@@ -1,19 +1,21 @@
 services:
   - type: web
-    name: slot-data-analyzer
+    name: dropbox-line-bot
     env: python
+    region: singapore
     plan: free
-    region: singapore  # または oregon, frankfurt など任意のリージョン
     buildCommand: ""
     startCommand: gunicorn main:app
     envVars:
-      - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: your_line_access_token_here
       - key: LINE_CHANNEL_SECRET
-        value: your_line_secret_here
-      - key: DROPBOX_REFRESH_TOKEN
-        value: your_dropbox_refresh_token_here
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
       - key: DROPBOX_APP_KEY
-        value: your_dropbox_app_key_here
+        sync: false
       - key: DROPBOX_APP_SECRET
-        value: your_dropbox_app_secret_here
+        sync: false
+      - key: DROPBOX_REFRESH_TOKEN
+        sync: false
+      - key: LINE_USER_ID
+        sync: false
