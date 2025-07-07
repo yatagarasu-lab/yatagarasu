@@ -2,8 +2,8 @@ flask
 gunicorn
 line-bot-sdk
 dropbox
+openai
+python-dotenv
 pytesseract
 Pillow
 PyMuPDF
-openai
-python-dotenv
