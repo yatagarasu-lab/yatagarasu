@@ -1,39 +1,19 @@
 import openai
 import os
 
-# OpenAI APIキーの読み込み
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+# OpenAIのAPIキー
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# GPT-4でファイル内容を要約・解析する関数
-def analyze_file_content(content, filename="ファイル"):
+def summarize_text(text):
     try:
-        # バイト型 → テキストへ変換（例：画像の場合はバイナリとして処理）
-        if isinstance(content, bytes):
-            try:
-                content = content.decode("utf-8", errors="ignore")
-            except Exception:
-                return f"{filename} はバイナリ形式のファイルのため、テキスト解析できませんでした。"
-
-        prompt = f"""
-このファイル「{filename}」の内容を要約・解析してください。
-以下がファイルの内容です（省略せず丁寧に処理してください）:
-
-----------
-{content}
-----------
-"""
-
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたはファイル解析と要約の専門家です。"},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "あなたはDropboxのファイル内容を要約・解析し、要点を抽出してレポートを作成するアシスタントです。"},
+                {"role": "user", "content": f"このファイルの内容を要約してください:\n\n{text}"}
             ],
-            temperature=0.4
+            temperature=0.3,
         )
-
-        return response.choices[0].message["content"]
-
+        return response['choices'][0]['message']['content'].strip()
     except Exception as e:
-        return f"{filename} の解析中にエラーが発生しました: {e}"
+        return f"[GPTエラー] {str(e)}"
