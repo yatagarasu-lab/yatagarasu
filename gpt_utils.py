@@ -1,28 +1,49 @@
 import openai
 import os
-import hashlib
+from line_utils import push_message
 
+# OpenAIの設定
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def summarize_text(text):
+def analyze_and_notify(filename, content):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下のテキストを要約してください。"},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.3,
-            max_tokens=300
-        )
-        return response.choices[0].message["content"].strip()
+        print(f"🧠 GPT解析開始: {filename}")
+
+        # バイナリ → テキスト（画像 or テキストファイル対応）
+        if filename.lower().endswith((".png", ".jpg", ".jpeg")):
+            base64_data = content.encode("base64")  # ※古いPythonならbase64.b64encode
+            response = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_data}",
+                                },
+                            },
+                            {"type": "text", "text": "この画像の要点を要約してください。"}
+                        ],
+                    }
+                ],
+            )
+            summary = response.choices[0].message.content.strip()
+        else:
+            text = content.decode("utf-8", errors="ignore")
+            response = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "あなたは優秀な要約AIです。"},
+                    {"role": "user", "content": f"以下を要約してください:\n\n{text}"}
+                ],
+            )
+            summary = response.choices[0].message.content.strip()
+
+        print("✅ GPT要約完了")
+        push_message(f"📂 {filename} の要約:\n{summary}")
+
     except Exception as e:
-        print(f"[GPT要約エラー]: {e}")
-        return "要約に失敗しました"
-
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-def is_duplicate(new_content, existing_contents):
-    new_hash = file_hash(new_content)
-    return new_hash in {file_hash(c) for c in existing_contents}
+        print(f"❌ GPT解析中にエラー: {e}")
+        push_message(f"⚠️ GPT解析エラー: {filename}")
