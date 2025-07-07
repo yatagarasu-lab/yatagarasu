@@ -1,53 +1,66 @@
 import os
 import dropbox
 import requests
-import time
+import json
+import hashlib
 
-# 環境変数からリフレッシュトークンとアプリ情報を取得
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# 環境変数から取得
+APP_KEY = os.getenv("DROPBOX_APP_KEY")
+APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# キャッシュ（再認証を減らす）
-_cached_token = None
-_cached_token_time = 0
-
+# アクセストークンをリフレッシュする関数
 def get_access_token():
-    global _cached_token, _cached_token_time
-
-    # キャッシュが5分以内なら再利用
-    if _cached_token and (time.time() - _cached_token_time < 300):
-        return _cached_token
-
     url = "https://api.dropbox.com/oauth2/token"
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
     data = {
         "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "refresh_token": REFRESH_TOKEN,
+        "client_id": APP_KEY,
+        "client_secret": APP_SECRET
     }
-    auth = (DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
+    response = requests.post(url, headers=headers, data=data)
+    if response.status_code == 200:
+        return response.json()["access_token"]
+    else:
+        raise Exception(f"アクセストークン取得失敗: {response.text}")
 
-    response = requests.post(url, data=data, auth=auth)
-    response.raise_for_status()
-    access_token = response.json()["access_token"]
-
-    # キャッシュ更新
-    _cached_token = access_token
-    _cached_token_time = time.time()
-    return access_token
-
-# Dropbox接続
+# Dropboxインスタンス作成
 def get_dbx():
-    token = get_access_token()
-    return dropbox.Dropbox(token)
+    access_token = get_access_token()
+    return dropbox.Dropbox(access_token)
 
 # ファイル一覧を取得
 def list_files(folder_path="/Apps/slot-data-analyzer"):
     dbx = get_dbx()
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-# ファイルをダウンロード
+# ファイルのダウンロード
 def download_file(path):
     dbx = get_dbx()
-    metadata, response = dbx.files_download(path)
-    return response.content
+    _, res = dbx.files_download(path)
+    return res.content
+
+# ファイルのSHA256ハッシュ値を取得
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+# 重複ファイルをチェック（同一ハッシュ）
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
+
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+
+        if hash_value in hash_map:
+            print(f"🔁 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
+            # dbx = get_dbx()
+            # dbx.files_delete_v2(path)  # 削除したい場合はこちらを有効化
+        else:
+            hash_map[hash_value] = path
