@@ -1,7 +1,5 @@
 Flask==2.2.5
-line-bot-sdk==3.10.0
+line-bot-sdk==3.10.1
 dropbox==11.36.2
 gunicorn==20.1.0
 requests==2.31.0
-openai==1.30.1       # GPT連携用
-python-dotenv==1.0.1 # .envファイル対応（環境変数管理）
