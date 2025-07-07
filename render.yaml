@@ -2,15 +2,14 @@ services:
   - type: web
     name: slot-data-analyzer
     env: python
+    region: singapore
     plan: free
-    buildCommand: ""
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app
     envVars:
-      - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: your_token
-      - key: LINE_CHANNEL_SECRET
-        value: your_secret
       - key: DROPBOX_ACCESS_TOKEN
-        value: your_dropbox_token
-      - key: OPENAI_API_KEY
-        value: your_openai_key
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
