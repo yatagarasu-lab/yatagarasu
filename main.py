@@ -1,116 +1,120 @@
 import os
-import hashlib
-import dropbox
-import fitz  # PyMuPDF
-import pytesseract
 import io
-import base64
-import requests
-from PIL import Image
-from flask import Flask, request
+import hashlib
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+from dotenv import load_dotenv
+import dropbox
+import openai
+from PIL import Image
+import pytesseract
 
-# Dropboxアクセストークンを自動取得
-def get_dropbox_access_token():
-    refresh_token = os.getenv('DROPBOX_REFRESH_TOKEN')
-    app_key = os.getenv('DROPBOX_APP_KEY')
-    app_secret = os.getenv('DROPBOX_APP_SECRET')
-    url = "https://api.dropboxapi.com/oauth2/token"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": app_key,
-        "client_secret": app_secret,
-    }
-    response = requests.post(url, headers=headers, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
+load_dotenv()
 
-# Dropbox初期化
-def create_dropbox_client():
-    token = get_dropbox_access_token()
-    return dropbox.Dropbox(token)
+# 環境変数読み込み
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# ハッシュで重複チェック
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# ファイルの中身を抽出
-def extract_text_from_file(path, dbx):
-    _, res = dbx.files_download(path)
-    content = res.content
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-    if path.endswith(".pdf"):
-        text = ""
-        doc = fitz.open(stream=content, filetype="pdf")
-        for page in doc:
-            text += page.get_text()
-        return text.strip()
+# OpenAI初期化
+openai.api_key = OPENAI_API_KEY
 
-    elif path.endswith((".png", ".jpg", ".jpeg")):
-        image = Image.open(io.BytesIO(content))
-        text = pytesseract.image_to_string(image, lang="jpn")
-        return text.strip()
+# LINE初期化
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-    return None
-
-# 重複ファイルの削除機能
-def find_and_delete_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    dbx = create_dropbox_client()
-    result = dbx.files_list_folder(folder_path)
-    hash_map = {}
-
-    for entry in result.entries:
-        path = entry.path_display
-        _, res = dbx.files_download(path)
-        content = res.content
-        h = file_hash(content)
-        if h in hash_map:
-            print(f"重複削除: {path}")
-            dbx.files_delete_v2(path)
-        else:
-            hash_map[h] = path
-
-# Flaskアプリ
+# Flask初期化
 app = Flask(__name__)
-line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
-handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# Dropbox認証（リフレッシュトークン方式）
+def get_dropbox_client():
+    from dropbox.oauth import DropboxOAuth2FlowNoRedirect
+    from dropbox import Dropbox
+    from dropbox.oauth import OAuth2AccessToken
+    from dropbox import DropboxOAuth2Flow
+
+    from dropbox import Dropbox, DropboxOAuth2FlowNoRedirect
+    from dropbox.oauth import OAuth2AccessToken, OAuth2Flow, OAuth2Session
+
+    oauth_result = dropbox.Dropbox(
+        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+        app_key=DROPBOX_APP_KEY,
+        app_secret=DROPBOX_APP_SECRET
+    )
+    return oauth_result
+
+dbx = get_dropbox_client()
+
+# ファイル保存先
+DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
+
+# 画像受信処理
+@app.route("/callback", methods=["POST"])
+def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except Exception as e:
         print(f"Error: {e}")
+        abort(400)
     return "OK"
 
+# メッセージ受信イベント
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_id = event.message.id
+    content = line_bot_api.get_message_content(message_id)
+
+    image_data = io.BytesIO(content.content)
+    image = Image.open(image_data)
+
+    # OCR解析（必要に応じて省略可）
+    text = pytesseract.image_to_string(image, lang="jpn")
+
+    # GPT要約
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "次の日本語テキストを要約してください。"},
+            {"role": "user", "content": text}
+        ]
+    )
+    summary = response.choices[0].message["content"]
+
+    # Dropboxに保存
+    filename = f"{event.timestamp}.jpg"
+    path = f"{DROPBOX_FOLDER}/{filename}"
+    image_data.seek(0)
+    dbx.files_upload(image_data.read(), path)
+
+    # LINEに通知
+    line_bot_api.push_message(
+        LINE_USER_ID,
+        TextSendMessage(text=f"画像の要約:\n{summary}")
+    )
+
+# LINEでテキストメッセージも処理（任意）
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_id = event.source.user_id
-    print(f"受信メッセージ: {event.message.text}")
+def handle_text_message(event):
+    text = event.message.text
+    if "こんにちは" in text:
+        reply = "こんにちは！画像を送ってくれたら要約します。"
+    else:
+        reply = "ありがとうございます"
 
-    try:
-        folder = "/Apps/slot-data-analyzer"
-        dbx = create_dropbox_client()
-        result = dbx.files_list_folder(folder)
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply)
+    )
 
-        messages = []
-        for entry in result.entries:
-            content = extract_text_from_file(entry.path_display, dbx)
-            if content:
-                messages.append(f"{entry.name}:\n{content[:200]}...")
-
-        final_msg = "\n\n".join(messages) if messages else "解析できるファイルが見つかりませんでした。"
-        line_bot_api.push_message(user_id, TextSendMessage(text=final_msg))
-
-    except Exception as e:
-        line_bot_api.push_message(user_id, TextSendMessage(text=f"エラーが発生しました: {str(e)}"))
-
-# 起動
+# アプリ起動
 if __name__ == "__main__":
     app.run()
