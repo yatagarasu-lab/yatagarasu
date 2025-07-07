@@ -2,107 +2,118 @@ from flask import Flask, request, abort
 import os
 import json
 import traceback
-import requests
+import dropbox
+import io
+import fitz  # PyMuPDF
+from PIL import Image
+import pytesseract
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from dropbox import Dropbox
 
 app = Flask(__name__)
 
-# 環境変数の取得
+# ===== LINE設定 =====
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
-DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
-LINE_USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"
+LINE_USER_ID = os.getenv("LINE_USER_ID", "U8da89a1a4e1689bbf7077dbdf0d47521")
 
-# LINEインスタンス
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# アクセストークン取得関数（毎回自動更新）
-def get_dropbox_access_token():
-    url = "https://api.dropbox.com/oauth2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_CLIENT_ID,
-        "client_secret": DROPBOX_CLIENT_SECRET,
-    }
-    response = requests.post(url, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
+# ===== Dropbox設定（リフレッシュトークン方式でもOK）=====
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# Webhookエンドポイント
+# ===== ファイルOCR解析 =====
+def analyze_file(file_path):
+    try:
+        _, ext = os.path.splitext(file_path.lower())
+        metadata, res = dbx.files_download(file_path)
+        file_data = res.content
+
+        # PDFの場合
+        if ext == ".pdf":
+            text = ""
+            with fitz.open(stream=file_data, filetype="pdf") as doc:
+                for page in doc:
+                    text += page.get_text()
+            return text.strip()
+
+        # 画像（JPEG/PNGなど）
+        elif ext in [".jpg", ".jpeg", ".png"]:
+            img = Image.open(io.BytesIO(file_data))
+            text = pytesseract.image_to_string(img, lang="jpn+eng")
+            return text.strip()
+
+        else:
+            return f"未対応ファイル形式: {ext}"
+
+    except Exception as e:
+        print("❌ 解析エラー:", str(e))
+        return f"[解析エラー]: {str(e)}"
+
+# ===== Webhookエンドポイント =====
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         challenge = request.args.get("challenge", "")
-        print("✅ Dropbox webhook検証（GET）:", challenge)
         return str(challenge), 200
 
     if request.method == "POST":
         try:
-            print("📩 Dropbox Webhook通知を受信:")
-            payload = request.get_json(silent=True)
-            print("📦 Payload (JSON):", json.dumps(payload, indent=2) if payload else "⚠️ JSONなし")
+            data = request.get_json(silent=True)
+            print("📩 Dropbox Webhook通知を受信")
 
-            # Dropboxアクセストークンを取得して接続
-            access_token = get_dropbox_access_token()
-            dbx = Dropbox(access_token)
+            for entry in data.get("list_folder", {}).get("entries", []):
+                if isinstance(entry, list) and len(entry) >= 2:
+                    path = entry[1].get("path_display")
+                    print("🔍 処理ファイル:", path)
 
-            folder_path = "/Apps/slot-data-analyzer"
-            entries = dbx.files_list_folder(folder_path).entries
-            if not entries:
-                line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text="📂 新しいファイルが見つかりません"))
-                return "", 200
+                    # ファイル内容取得・解析
+                    result_text = analyze_file(path)
 
-            # 最新ファイル取得（最終更新日時でソート）
-            entries.sort(key=lambda x: x.server_modified if hasattr(x, "server_modified") else None, reverse=True)
-            latest = entries[0]
-            file_path = latest.path_display
-
-            # ファイル取得と中身の抽出
-            metadata, res = dbx.files_download(file_path)
-            content = res.content.decode("utf-8", errors="ignore")
-            preview = content[:300] + ("..." if len(content) > 300 else "")
-
-            # LINE通知送信
-            line_bot_api.push_message(
-                LINE_USER_ID,
-                TextSendMessage(
-                    text=f"📥 Dropboxにファイルが追加・更新されました！\n\n🗂️ ファイル名：{latest.name}\n📄 内容抜粋：\n{preview}"
-                )
-            )
+                    # LINE通知
+                    line_bot_api.push_message(
+                        LINE_USER_ID,
+                        TextSendMessage(text=f"📄 {path} の内容を解析しました：\n\n{result_text[:1000]}")
+                    )
 
             return "", 200
-
         except Exception as e:
             print("❌ Webhookエラー:", str(e))
             traceback.print_exc()
+
             try:
-                line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"⚠ Webhookエラー: {str(e)}"))
-            except Exception as notify_err:
-                print("❌ LINE通知失敗:", notify_err)
+                line_bot_api.push_message(
+                    LINE_USER_ID,
+                    TextSendMessage(text=f"[Webhookエラー]\n{str(e)}")
+                )
+            except:
+                pass
+
             return "Internal Server Error", 500
 
-# LINEのメッセージ受信エンドポイント
+# ===== LINE Callbackエンドポイント =====
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
     print("💬 LINE Message:", body)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+
     return "OK"
 
+# ===== LINE受信メッセージ応答 =====
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
+    reply_text = "ありがとうございます"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
+# ===== アプリ起動 =====
 if __name__ == "__main__":
     app.run()
