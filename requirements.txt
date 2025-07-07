@@ -1,8 +1,8 @@
-Flask
+flask
 gunicorn
-line-bot-sdk
-openai
 python-dotenv
-pillow
-pytesseract
+line-bot-sdk
 dropbox
+openai
+pytesseract
+pillow
