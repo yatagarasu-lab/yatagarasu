@@ -1,42 +1,52 @@
 import os
 import dropbox
+from dropbox.files import FileMetadata
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
-from dropbox_utils import list_files, download_file
 from gpt_utils import summarize_text
+from dropbox_utils import list_files, download_file
 
-# 環境変数の読み込み
-DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# LINE通知設定
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")  # push送信先ユーザー
-
-# インスタンス作成
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# Dropbox更新時の処理関数
-def handle_dropbox_update():
-    try:
-        print("🔍 Dropbox更新を検知、ファイル一覧を取得中...")
-        files = list_files()
+# Dropbox接続
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-        if not files:
-            print("❗ファイルが存在しません。")
-            return
+# 対象フォルダ
+FOLDER_PATH = "/Apps/slot-data-analyzer"
 
-        latest_file = sorted(files, key=lambda f: f.server_modified, reverse=True)[0]
-        print(f"📦 最新ファイル: {latest_file.name}")
+def handle_new_files():
+    """
+    Dropboxフォルダ内の全ファイルを取得して、
+    テキスト・画像ファイルをGPTで要約し、LINE通知する。
+    """
+    print("📂 Dropboxのファイル一覧を取得中...")
+    files = list_files(FOLDER_PATH)
 
-        content = download_file(latest_file.path_display).decode("utf-8", errors="ignore")
+    for entry in files:
+        if isinstance(entry, FileMetadata):
+            path = entry.path_display
+            print(f"📄 処理対象ファイル: {path}")
 
-        print("🧠 GPTで解析中...")
-        summary = summarize_text(content)
+            # ファイル内容を取得
+            content = download_file(path)
 
-        message = f"📂 最新ファイル: {latest_file.name}\n\n📝 要約:\n{summary}"
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+            # テキストファイルの場合のみ処理
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                print("🔍 画像などの非テキストファイルはスキップ")
+                continue
 
-        print("✅ LINE通知完了")
-    except Exception as e:
-        error_message = f"[Dropbox処理エラー]: {str(e)}"
-        print(error_message)
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=error_message))
+            # GPTで要約
+            summary = summarize_text(text)
+
+            # LINEに通知
+            message = f"📩 ファイル名: {os.path.basename(path)}\n📄 要約:\n{summary}"
+            line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+            print("✅ LINE通知完了")
+
+    return "完了"
