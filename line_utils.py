@@ -2,16 +2,17 @@ import os
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
-# 環境変数からLINEトークン取得
+# 環境変数からLINEトークンとユーザーIDを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")  # 送信先ユーザーID
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+# LINE Bot APIの初期化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# Push通知を送る
-def push_message(text, user_id=LINE_USER_ID):
+# 通知送信関数
+def push_message(message):
     try:
-        message = TextSendMessage(text=text)
-        line_bot_api.push_message(user_id, messages=[message])
-        print(f"✅ LINEに送信: {text}")
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+        print(f"✅ LINEに送信しました: {message}")
     except Exception as e:
-        print(f"❌ LINE送信失敗: {e}")
+        print(f"❌ LINE通知エラー: {e}")
