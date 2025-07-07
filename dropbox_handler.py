@@ -1,65 +1,42 @@
-import dropbox
 import os
-from gpt_analyzer import analyze_file_and_notify, file_hash
-from line_push import send_line_message
+import dropbox
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+from dropbox_utils import list_files, download_file
+from gpt_utils import summarize_text
 
-# 環境変数から取得（Renderに設定）
-DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET")
+# 環境変数の読み込み
+DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")  # push送信先ユーザー
 
-# アクセストークンを取得
-def get_access_token():
-    from requests.auth import HTTPBasicAuth
-    import requests
+# インスタンス作成
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-    url = "https://api.dropboxapi.com/oauth2/token"
-    headers = {}
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-    }
-    auth = HTTPBasicAuth(DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
+# Dropbox更新時の処理関数
+def handle_dropbox_update():
+    try:
+        print("🔍 Dropbox更新を検知、ファイル一覧を取得中...")
+        files = list_files()
 
-    response = requests.post(url, headers=headers, data=data, auth=auth)
-    return response.json().get("access_token")
+        if not files:
+            print("❗ファイルが存在しません。")
+            return
 
-# Dropboxインスタンス生成
-def get_dropbox_client():
-    token = get_access_token()
-    return dropbox.Dropbox(token)
+        latest_file = sorted(files, key=lambda f: f.server_modified, reverse=True)[0]
+        print(f"📦 最新ファイル: {latest_file.name}")
 
-# フォルダ内のファイル一覧取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    dbx = get_dropbox_client()
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+        content = download_file(latest_file.path_display).decode("utf-8", errors="ignore")
 
-# ファイルをダウンロード
-def download_file(path):
-    dbx = get_dropbox_client()
-    metadata, res = dbx.files_download(path)
-    return res.content
+        print("🧠 GPTで解析中...")
+        summary = summarize_text(content)
 
-# Webhook受信時のイベント処理
-def handle_dropbox_event():
-    folder_path = "/Apps/slot-data-analyzer"
-    files = list_files(folder_path)
-    seen_hashes = {}
+        message = f"📂 最新ファイル: {latest_file.name}\n\n📝 要約:\n{summary}"
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
 
-    for file in files:
-        try:
-            path = file.path_display
-            content = download_file(path)
-            hash_value = file_hash(content)
-
-            # 重複ファイルチェック
-            if hash_value in seen_hashes:
-                dbx = get_dropbox_client()
-                dbx.files_delete_v2(path)
-                send_line_message(f"🗑️ 重複ファイルを削除しました: {path}")
-            else:
-                seen_hashes[hash_value] = path
-                analyze_file_and_notify(path, content)
-        except Exception as e:
-            send_line_message(f"⚠️ Dropbox処理でエラー: {e}")
+        print("✅ LINE通知完了")
+    except Exception as e:
+        error_message = f"[Dropbox処理エラー]: {str(e)}"
+        print(error_message)
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=error_message))
