@@ -1,35 +1,40 @@
+import os
 from dropbox_utils import list_files, download_file
-from gpt_utils import summarize_text
-from line_notify import send_line_message
-import hashlib
+from gpt_utils import summarize_text, is_duplicate
+from line_utils import send_line_message
 
-PROCESSED_HASHES = set()
+# 監視フォルダ
+FOLDER_PATH = "/Apps/slot-data-analyzer"
 
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+# 保存済みファイル内容キャッシュ（実際の運用ではDB等で管理推奨）
+processed_files = {}
 
-def handle_dropbox_file():
-    files = list_files()
-    new_messages = []
+def handle_new_files():
+    print("📂 Dropboxフォルダを確認中...")
+    try:
+        entries = list_files(FOLDER_PATH)
+        for entry in entries:
+            path = entry.path_display
+            if path in processed_files:
+                continue  # すでに処理済み
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
+            print(f"📥 新ファイル検出: {path}")
+            content = download_file(path)
 
-        if hash_value in PROCESSED_HASHES:
-            continue
+            # 重複チェック
+            if is_duplicate(content, processed_files.values()):
+                print("⚠️ 重複ファイルとしてスキップ")
+                continue
 
-        PROCESSED_HASHES.add(hash_value)
+            # GPTで要約
+            summary = summarize_text(content.decode(errors="ignore"))
+            print(f"📝 要約結果: {summary}")
 
-        try:
-            text = content.decode("utf-8", errors="ignore")
-            summary = summarize_text(text)
-            new_messages.append(f"📝 {file.name}\n{summary}")
-        except Exception as e:
-            new_messages.append(f"📷 {file.name}（画像または解析不可）")
+            # LINEへ通知
+            send_line_message(f"📄 新ファイル: {os.path.basename(path)}\n📝 要約: {summary}")
 
-    if new_messages:
-        send_line_message("\n\n".join(new_messages))
-    else:
-        print("🟰 No new files to process.")
+            # 処理済みに追加
+            processed_files[path] = content
+
+    except Exception as e:
+        print(f"[ファイル処理エラー]: {e}")
