@@ -1,49 +1,53 @@
 import os
 import dropbox
 import requests
-from hashlib import sha256
+import time
 
-# 環境変数から設定を取得
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# 環境変数からリフレッシュトークンとアプリ情報を取得
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_ACCESS_TOKEN = None  # 起動時にはトークンなし
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# Dropboxインスタンス（アクセストークン更新で再作成）
-dbx = None
+# キャッシュ（再認証を減らす）
+_cached_token = None
+_cached_token_time = 0
 
-def refresh_access_token():
-    global DROPBOX_ACCESS_TOKEN, dbx
-    print("🔄 アクセストークンを更新中...")
-    url = "https://api.dropboxapi.com/oauth2/token"
+def get_access_token():
+    global _cached_token, _cached_token_time
+
+    # キャッシュが5分以内なら再利用
+    if _cached_token and (time.time() - _cached_token_time < 300):
+        return _cached_token
+
+    url = "https://api.dropbox.com/oauth2/token"
     data = {
         "grant_type": "refresh_token",
         "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_APP_KEY,
-        "client_secret": DROPBOX_APP_SECRET,
     }
+    auth = (DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
 
-    response = requests.post(url, data=data)
-    if response.status_code == 200:
-        DROPBOX_ACCESS_TOKEN = response.json()["access_token"]
-        dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-        print("✅ アクセストークン更新完了")
-    else:
-        raise Exception(f"アクセストークンの更新に失敗: {response.text}")
+    response = requests.post(url, data=data, auth=auth)
+    response.raise_for_status()
+    access_token = response.json()["access_token"]
 
-def ensure_dbx():
-    if dbx is None:
-        refresh_access_token()
+    # キャッシュ更新
+    _cached_token = access_token
+    _cached_token_time = time.time()
+    return access_token
 
-def list_files(folder_path):
-    ensure_dbx()
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+# Dropbox接続
+def get_dbx():
+    token = get_access_token()
+    return dropbox.Dropbox(token)
 
+# ファイル一覧を取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dbx()
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
+
+# ファイルをダウンロード
 def download_file(path):
-    ensure_dbx()
+    dbx = get_dbx()
     metadata, response = dbx.files_download(path)
     return response.content
-
-def file_hash(content):
-    return sha256(content).hexdigest()
