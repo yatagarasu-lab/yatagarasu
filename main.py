@@ -83,7 +83,7 @@ def send_line_notification(messages):
     full_message = "\n\n".join(messages)
     line_bot_api.push_message(
         LINE_USER_ID,
-        TextSendMessage(text=full_message[:5000])  # LINE上限5000文字
+        TextSendMessage(text=full_message[:5000])  # LINE上限
     )
 
 # Webhook
