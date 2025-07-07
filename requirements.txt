@@ -1,7 +1,5 @@
-Flask==2.3.3
-gunicorn==21.2.0
-requests==2.31.0
-openai==1.30.1
-dropbox==11.36.2
-line-bot-sdk==3.4.0
-python-dotenv==1.0.1
+flask
+line-bot-sdk
+dropbox
+openai
+gunicorn
