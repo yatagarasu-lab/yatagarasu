@@ -1,54 +1,49 @@
 import os
-import json
-import requests
 import dropbox
+import requests
+from hashlib import sha256
 
-# 環境変数から各種キーを取得
+# 環境変数から設定を取得
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
-DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_ACCESS_TOKEN = None  # 起動時にはトークンなし
 
-# アクセストークン取得（自動更新）
-def get_access_token():
+# Dropboxインスタンス（アクセストークン更新で再作成）
+dbx = None
+
+def refresh_access_token():
+    global DROPBOX_ACCESS_TOKEN, dbx
+    print("🔄 アクセストークンを更新中...")
     url = "https://api.dropboxapi.com/oauth2/token"
     data = {
         "grant_type": "refresh_token",
         "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_CLIENT_ID,
-        "client_secret": DROPBOX_CLIENT_SECRET,
+        "client_id": DROPBOX_APP_KEY,
+        "client_secret": DROPBOX_APP_SECRET,
     }
 
     response = requests.post(url, data=data)
     if response.status_code == 200:
-        token_info = response.json()
-        return token_info["access_token"]
+        DROPBOX_ACCESS_TOKEN = response.json()["access_token"]
+        dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+        print("✅ アクセストークン更新完了")
     else:
-        raise Exception(f"アクセストークンの取得に失敗しました: {response.text}")
+        raise Exception(f"アクセストークンの更新に失敗: {response.text}")
 
-# Dropboxクライアント作成
-def get_dropbox_client():
-    access_token = get_access_token()
-    return dropbox.Dropbox(access_token)
+def ensure_dbx():
+    if dbx is None:
+        refresh_access_token()
 
-# 指定フォルダ内のファイル一覧取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    dbx = get_dropbox_client()
+def list_files(folder_path):
+    ensure_dbx()
     res = dbx.files_list_folder(folder_path)
     return res.entries
 
-# ファイルのダウンロード
 def download_file(path):
-    dbx = get_dropbox_client()
-    _, res = dbx.files_download(path)
-    return res.content
+    ensure_dbx()
+    metadata, response = dbx.files_download(path)
+    return response.content
 
-# ファイルのアップロード（必要なら）
-def upload_file(local_path, dropbox_path):
-    dbx = get_dropbox_client()
-    with open(local_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-
-# ファイルの削除（重複対策などで使用）
-def delete_file(dropbox_path):
-    dbx = get_dropbox_client()
-    dbx.files_delete_v2(dropbox_path)
+def file_hash(content):
+    return sha256(content).hexdigest()
