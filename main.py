@@ -1,161 +1,85 @@
 import os
+import io
 import hashlib
-import dropbox
-from flask import Flask, request
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import TextSendMessage
-from openai import OpenAI
+from linebot.models import MessageEvent, TextMessage, ImageMessage
 from dotenv import load_dotenv
-from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-from dropbox.exceptions import AuthError
+from dropbox import Dropbox
 
-# 環境変数をロード
+# 外部モジュール（強化版ロジック）
+from analyzer import analyze_file
+from notifier import build_summary_message
+
+# .envから読み込み
 load_dotenv()
-
-# Flaskアプリの初期化
-app = Flask(__name__)
-
-# 環境変数の取得
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
+
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# LINE Bot初期化
+# LINEとFlask初期化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+app = Flask(__name__)
 
-# OpenAI初期化
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Dropboxへの接続
+# Dropbox接続
 def get_dropbox_client():
+    return Dropbox(
+        app_key=DROPBOX_APP_KEY,
+        app_secret=DROPBOX_APP_SECRET,
+        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+    )
+
+dbx = get_dropbox_client()
+
+# Webhookルート
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
+
     try:
-        from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-        from dropbox import Dropbox, DropboxOAuth2Flow
-        from dropbox.oauth import OAuth2FlowNoRedirectResult
-
-        refresh_token = DROPBOX_REFRESH_TOKEN
-        app_key = DROPBOX_APP_KEY
-        app_secret = DROPBOX_APP_SECRET
-
-        dbx = dropbox.Dropbox(
-            app_key=app_key,
-            app_secret=app_secret,
-            oauth2_refresh_token=refresh_token
-        )
-        dbx.users_get_current_account()  # 接続確認
-        return dbx
-    except AuthError as e:
-        print(f"Dropbox認証エラー: {e}")
-        return None
-
-# Dropboxのファイル一覧取得
-def list_files(folder_path):
-    dbx = get_dropbox_client()
-    if not dbx:
-        return []
-    try:
-        result = dbx.files_list_folder(folder_path)
-        return result.entries
+        handler.handle(body, signature)
     except Exception as e:
-        print(f"ファイル一覧取得エラー: {e}")
-        return []
+        print(f"Webhook error: {e}")
+        abort(400)
 
-# Dropboxからファイルダウンロード
-def download_file(path):
-    dbx = get_dropbox_client()
-    if not dbx:
-        return None
-    try:
-        metadata, res = dbx.files_download(path)
-        return res.content
-    except Exception as e:
-        print(f"ファイルダウンロードエラー: {e}")
-        return None
+    return "OK"
 
-# ファイルのハッシュ計算
-def file_hash(data):
-    return hashlib.sha256(data).hexdigest()
+# LINE画像受信イベント
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    message_id = event.message.id
+    content = line_bot_api.get_message_content(message_id)
+    image_data = io.BytesIO(content.content)
 
-# 重複ファイルの検出
-def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    hash_map = {}
-    duplicates = []
+    # ファイル保存先
+    filename = f"{event.timestamp}.jpg"
+    dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        if not content:
-            continue
-        hash_value = file_hash(content)
+    # Dropboxアップロード
+    image_data.seek(0)
+    dbx.files_upload(image_data.read(), dropbox_path)
+    image_data.seek(0)
 
-        if hash_value in hash_map:
-            print(f"重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            duplicates.append(path)
-            # dbx.files_delete_v2(path)  # 必要なら有効化
-        else:
-            hash_map[hash_value] = path
-    return duplicates
+    # 解析処理（強化版）
+    summary = analyze_file(filename, image_data)
 
-# ファイル内容の要約（OpenAI）
-def summarize_text(content):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下の内容を要約してください。"},
-                {"role": "user", "content": content}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"要約エラー: {e}")
-        return "要約できませんでした。"
+    # 通知送信（まとめ）
+    summary_text = build_summary_message([summary])
+    line_bot_api.push_message(LINE_USER_ID, TextMessage(text=summary_text))
 
-# LINE通知送信
-def notify_line(message):
-    try:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
-    except Exception as e:
-        print(f"LINE通知エラー: {e}")
+# LINEテキスト受信イベント（任意のあいさつ）
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text(event):
+    text = event.message.text
+    reply = "こんにちは！画像を送ってくれたら要約します。" if "こんにちは" in text else "ありがとうございます"
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# Dropbox Webhook
-@app.route("/webhook", methods=["GET", "POST"])
-def dropbox_webhook():
-    if request.method == "GET":
-        return request.args.get("challenge")
-    elif request.method == "POST":
-        print("📦 Dropbox webhook POST 受信しました")
-        process_new_files()
-        return "OK"
-
-# Dropboxファイルの解析処理
-def process_new_files():
-    folder = "/Apps/slot-data-analyzer"
-    files = list_files(folder)
-    if not files:
-        notify_line("📂 新しいファイルは見つかりませんでした。")
-        return
-
-    for file in files:
-        content = download_file(file.path_display)
-        if content:
-            try:
-                text = content.decode("utf-8", errors="ignore")
-                summary = summarize_text(text)
-                notify_line(f"📄 {file.name} の要約:\n{summary}")
-            except Exception as e:
-                notify_line(f"⚠️ {file.name} の処理中にエラー: {e}")
-
-# 動作確認用エンドポイント
-@app.route("/", methods=["GET"])
-def index():
-    return "✅ GPT Dropbox連携サーバー稼働中"
-
-# アプリ起動用（Render用に必要）
-app = app
+# 起動
+if __name__ == "__main__":
+    app.run()
