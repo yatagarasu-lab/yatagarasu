@@ -1,5 +1,6 @@
 flask
+gunicorn
 line-bot-sdk
 dropbox
 openai
-gunicorn
+python-dotenv
