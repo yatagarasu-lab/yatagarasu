@@ -19,7 +19,10 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return request.args.get("challenge"), 200
+        # Dropboxが送る challenge を文字列で返す（Noneでも空文字で返す）
+        challenge = request.args.get("challenge", "")
+        print("✅ Webhook検証（GET）:", challenge)
+        return str(challenge), 200
 
     if request.method == "POST":
         try:
@@ -27,12 +30,9 @@ def webhook():
             print("📩 Dropbox Webhook通知を受信:")
             print(raw_data)
 
-            # JSONとしてパース可能か確認
-            try:
-                payload = json.loads(raw_data)
-                print("📦 JSON Payload:\n", json.dumps(payload, indent=2))
-            except Exception as json_err:
-                print("⚠️ JSONパースエラー:", json_err)
+            # JSONとしてパース（安全なパース）
+            payload = request.get_json(silent=True)
+            print("📦 Payload (JSON):", json.dumps(payload, indent=2) if payload else "⚠️ JSONなし")
 
             # LINE通知（テスト用）
             line_bot_api.push_message(
