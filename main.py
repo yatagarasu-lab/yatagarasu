@@ -1,120 +1,141 @@
 import os
 import hashlib
 import io
+import json
+import requests
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
-from flask import Flask, request
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage
+from linebot.exceptions import InvalidSignatureError
 from dotenv import load_dotenv
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-import dropbox
-import openai
+from dropbox import Dropbox
 
+# 環境変数の読み込み
 load_dotenv()
 
-app = Flask(__name__)
+# LINE API キー
+LINE_CHANNEL_SECRET = os.getenv("CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# 環境変数
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# Dropbox 認証情報
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
+# OpenAIキー（使ってる場合）
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# 初期化
-openai.api_key = OPENAI_API_KEY
+# Flaskアプリ初期化
+app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# Dropbox アクセストークンの取得
+def get_dropbox_access_token():
+    url = "https://api.dropbox.com/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_APP_KEY,
+        "client_secret": DROPBOX_APP_SECRET
+    }
+    response = requests.post(url, data=data)
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+# Dropbox 初期化
 def get_dropbox_client():
-    from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-    from dropbox import Dropbox
-    from dropbox.oauth import OAuth2Session
+    access_token = get_dropbox_access_token()
+    return Dropbox(access_token)
 
-    refresh_token = DROPBOX_REFRESH_TOKEN
-    app_key = DROPBOX_APP_KEY
-    app_secret = DROPBOX_APP_SECRET
-
-    oauth_session = OAuth2Session(
-        consumer_key=app_key,
-        consumer_secret=app_secret,
-        token={"refresh_token": refresh_token}
-    )
-    dbx = Dropbox(oauth2_access_token=oauth_session.refresh_access_token()["access_token"])
-    return dbx
-
+# 重複判定ハッシュ生成
 def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+    return hashlib.sha256(content).hexdigest()
 
-def download_file(dbx, path):
+# ファイル取得と解析処理（PDF / 画像）
+def analyze_file(dbx, path):
     _, res = dbx.files_download(path)
-    return res.content
+    content = res.content
 
-def extract_text_from_image(content):
-    image = Image.open(io.BytesIO(content))
-    text = pytesseract.image_to_string(image, lang='jpn+eng')
-    return text
+    ext = os.path.splitext(path)[1].lower()
+    text_result = ""
 
-def extract_text_from_pdf(content):
-    text = ""
-    with fitz.open(stream=content, filetype="pdf") as doc:
+    if ext == ".pdf":
+        doc = fitz.open(stream=content, filetype="pdf")
         for page in doc:
-            text += page.get_text()
-    return text
+            text_result += page.get_text()
+    elif ext in [".jpg", ".jpeg", ".png"]:
+        image = Image.open(io.BytesIO(content))
+        text_result = pytesseract.image_to_string(image)
+    else:
+        text_result = "[未対応のファイル形式]"
 
-def analyze_with_gpt(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "これはDropboxから抽出したデータです。要点を簡潔にまとめてください。"},
-            {"role": "user", "content": text}
-        ]
-    )
-    return response["choices"][0]["message"]["content"]
+    return text_result.strip()
 
-def send_line_notification(message):
-    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
-
-def is_duplicate(content, hash_map):
-    h = file_hash(content)
-    if h in hash_map:
-        return True
-    hash_map[h] = True
-    return False
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# ファイル一覧取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
     dbx = get_dropbox_client()
-    folder = "/Apps/slot-data-analyzer"
+    result = dbx.files_list_folder(folder_path)
+    return result.entries
+
+# Webhook受信（LINEから）
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return "OK"
+
+# ファイル変更通知受信（Dropboxから）
+@app.route("/dropbox_webhook", methods=["POST"])
+def dropbox_webhook():
+    dbx = get_dropbox_client()
+    files = list_files()
+
     hash_map = {}
 
-    result_message = "📦【Dropbox更新解析】\n"
+    for file in files:
+        path = file.path_display
+        _, res = dbx.files_download(path)
+        content = res.content
+        h = file_hash(content)
 
-    for entry in dbx.files_list_folder(folder).entries:
-        path = entry.path_display
-        if not isinstance(entry, dropbox.files.FileMetadata):
-            continue
-
-        content = download_file(dbx, path)
-
-        # 重複チェック
-        if is_duplicate(content, hash_map):
+        if h in hash_map:
             dbx.files_delete_v2(path)
-            continue
-
-        if path.lower().endswith((".jpg", ".jpeg", ".png")):
-            text = extract_text_from_image(content)
-        elif path.lower().endswith(".pdf"):
-            text = extract_text_from_pdf(content)
+            print(f"削除: 重複 {path}")
         else:
-            continue
+            hash_map[h] = path
+            result = analyze_file(dbx, path)
+            send_line_notify(f"📥 新ファイル: {path}\n\n📄 抽出:\n{result[:500]}")
 
-        summary = analyze_with_gpt(text)
-        result_message += f"\n📄 {os.path.basename(path)}:\n{summary}\n"
+    return "OK"
 
-    send_line_notification(result_message.strip())
-    return "OK", 200
+# Challenge 用（GET）
+@app.route("/dropbox_webhook", methods=["GET"])
+def dropbox_verify():
+    return request.args.get("challenge")
 
+# LINE通知送信
+def send_line_notify(text):
+    try:
+        line_bot_api.push_message(LINE_USER_ID, TextMessage(text=text))
+    except Exception as e:
+        print(f"LINE通知エラー: {e}")
+
+# ルート
+@app.route("/", methods=["GET"])
+def index():
+    return "動作中"
+
+# アプリ起動（ローカル用）
 if __name__ == "__main__":
     app.run()
