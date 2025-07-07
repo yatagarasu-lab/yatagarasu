@@ -1,35 +1,36 @@
-import hashlib
-import openai
 import os
-from line_push import send_line_message
+from dropbox_utils import list_files, download_file, file_hash
+import openai
 
-# OpenAI APIキー
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# ファイルのハッシュ値を計算（重複チェック用）
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+processed_hashes = set()
 
-# GPT解析してLINEへ通知
-def analyze_file_and_notify(filename, content):
+def analyze_and_notify(line_bot_api, line_user_id):
+    files = list_files()
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+
+        if hash_value in processed_hashes:
+            print(f"🔁 重複スキップ: {path}")
+            continue
+        processed_hashes.add(hash_value)
+
+        summary = gpt_summarize(content.decode('utf-8', errors='ignore'))
+        message = f"📂 {path}\n📝 要約:\n{summary}"
+        line_bot_api.push_message(line_user_id, TextSendMessage(text=message))
+
+def gpt_summarize(text):
     try:
-        # ファイル内容を文字列に変換（画像なども将来対応可）
-        text = content.decode("utf-8", errors="ignore")
-
-        # GPT解析リクエスト
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたは分析の専門家です。ファイル内容を要約し、重要なポイントを抽出してください。"},
-                {"role": "user", "content": f"以下のファイルの内容を分析してください:\n{text}"}
-            ],
-            temperature=0.3,
-            max_tokens=800
+                {"role": "system", "content": "これはDropboxにアップロードされたファイルの中身です。短く要約してください。"},
+                {"role": "user", "content": text[:4000]}  # 長文防止
+            ]
         )
-
-        result = response["choices"][0]["message"]["content"]
-        message = f"📄 ファイル `{filename}` の解析結果:\n\n{result}"
-        send_line_message(message)
-
+        return response['choices'][0]['message']['content'].strip()
     except Exception as e:
-        send_line_message(f"⚠️ GPT解析エラー: {e}")
+        return f"❌ GPT解析失敗: {e}"
