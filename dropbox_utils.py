@@ -1,63 +1,54 @@
 import os
+import json
+import requests
 import dropbox
-import hashlib
 
-# 環境変数からDropboxのリフレッシュトークンとApp Key/Secretを取得
+# 環境変数から各種キーを取得
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-FOLDER_PATH = "/Apps/slot-data-analyzer"
+DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
+DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 
-# Dropboxクライアントの初期化（リフレッシュトークン方式）
-def create_dropbox_client():
-    if not DROPBOX_REFRESH_TOKEN or not DROPBOX_APP_KEY or not DROPBOX_APP_SECRET:
-        raise ValueError("Dropboxの環境変数が正しく設定されていません")
-    
-    return dropbox.Dropbox(
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET,
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
-    )
+# アクセストークン取得（自動更新）
+def get_access_token():
+    url = "https://api.dropboxapi.com/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_CLIENT_ID,
+        "client_secret": DROPBOX_CLIENT_SECRET,
+    }
 
-dbx = create_dropbox_client()
+    response = requests.post(url, data=data)
+    if response.status_code == 200:
+        token_info = response.json()
+        return token_info["access_token"]
+    else:
+        raise Exception(f"アクセストークンの取得に失敗しました: {response.text}")
 
-# フォルダ内のファイル一覧を取得
-def list_files(folder_path=FOLDER_PATH):
-    try:
-        res = dbx.files_list_folder(folder_path)
-        return res.entries
-    except Exception as e:
-        print(f"Dropboxフォルダ一覧取得エラー: {e}")
-        return []
+# Dropboxクライアント作成
+def get_dropbox_client():
+    access_token = get_access_token()
+    return dropbox.Dropbox(access_token)
 
-# 指定パスのファイルをダウンロード
+# 指定フォルダ内のファイル一覧取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
+
+# ファイルのダウンロード
 def download_file(path):
-    try:
-        metadata, res = dbx.files_download(path)
-        return res.content
-    except Exception as e:
-        print(f"Dropboxファイルダウンロードエラー: {e}")
-        return None
+    dbx = get_dropbox_client()
+    _, res = dbx.files_download(path)
+    return res.content
 
-# ファイルのハッシュ値を計算（重複判定用）
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+# ファイルのアップロード（必要なら）
+def upload_file(local_path, dropbox_path):
+    dbx = get_dropbox_client()
+    with open(local_path, "rb") as f:
+        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-# 重複ファイルを検出・削除（任意で有効化）
-def find_duplicates(folder_path=FOLDER_PATH):
-    files = list_files(folder_path)
-    hash_map = {}
-
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        if content is None:
-            continue
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            print(f"✅ 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            # 削除したい場合はこちらを有効化
-            # dbx.files_delete_v2(path)
-        else:
-            hash_map[hash_value] = path
+# ファイルの削除（重複対策などで使用）
+def delete_file(dropbox_path):
+    dbx = get_dropbox_client()
+    dbx.files_delete_v2(dropbox_path)
