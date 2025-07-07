@@ -1,111 +1,102 @@
 import os
+import io
 import hashlib
-import json
-import tempfile
-from flask import Flask, request
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
 from dotenv import load_dotenv
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
 import dropbox
-import pytesseract
-from PIL import Image
 import openai
+from PIL import Image
+import pytesseract
+from datetime import datetime
+
+# 環境変数読み込み
+load_dotenv()
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("USER_ID")
+
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
 
 # 初期化
-load_dotenv()
 app = Flask(__name__)
-
-# 環境変数
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# インスタンス
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# 重複チェックマップ
-file_hashes = {}
+# 一時的に画像解析結果を貯めるバッファ
+summary_buffer = []
 
-# ファイルのハッシュ計算
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-# Dropboxからファイル一覧取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
-
-# ファイルを一時保存＋OCR実行
-def process_file(entry):
-    path = entry.path_display
-    _, ext = os.path.splitext(path)
-    metadata, res = dbx.files_download(path)
-    content = res.content
-    hash_val = file_hash(content)
-
-    # 重複ならスキップ
-    if hash_val in file_hashes:
-        return f"[重複スキップ] {path}"
-    file_hashes[hash_val] = path
-
-    # OCR処理
-    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-    text = pytesseract.image_to_string(Image.open(tmp_path), lang='jpn')
-
-    # GPT要約
-    summary = summarize_with_gpt(text)
-    return f"📄 {entry.name}\n📝 要約:\n{summary}"
-
-# GPTによる要約
-def summarize_with_gpt(text):
+# LINEのWebhookエントリポイント
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
     try:
-        if not text.strip():
-            return "文字が検出されませんでした。"
-        res = openai.ChatCompletion.create(
-            model="gpt-4",
+        handler.handle(body, signature)
+    except Exception as e:
+        print(f"エラー: {e}")
+        abort(400)
+    return "OK"
+
+# 画像受信時の処理
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    try:
+        message_id = event.message.id
+        content = line_bot_api.get_message_content(message_id)
+        image_data = io.BytesIO(content.content)
+        image = Image.open(image_data)
+
+        # OCR処理
+        try:
+            text = pytesseract.image_to_string(image, lang="jpn")
+            if not text.strip():
+                text = "（画像から文字を抽出できませんでした）"
+        except Exception as e:
+            text = f"（OCRエラー: {e}）"
+
+        # 要約（GPT）
+        gpt_response = openai.ChatCompletion.create(
+            model=GPT_MODEL,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
             messages=[
-                {"role": "system", "content": "以下はスロットイベントやパチンコ店情報の画像から抽出された文字です。要点を簡潔にまとめてください。"},
+                {"role": "system", "content": "以下の日本語文章を簡潔に要約してください。"},
                 {"role": "user", "content": text}
-            ],
-            max_tokens=300,
+            ]
         )
-        return res['choices'][0]['message']['content'].strip()
+        summary = gpt_response.choices[0].message["content"]
+
+        # Dropboxに画像保存
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{timestamp}.jpg"
+        path = f"/Apps/slot-data-analyzer/{filename}"
+        image_data.seek(0)
+        dbx.files_upload(image_data.read(), path)
+
+        # バッファに追加（通知は別でまとめて送信）
+        summary_buffer.append(f"【{timestamp}】\n{summary.strip()}")
     except Exception as e:
-        return f"要約失敗: {e}"
+        summary_buffer.append(f"解析失敗: {str(e)}")
 
-# LINE通知
-def send_line_notification(messages):
-    full_message = "\n\n".join(messages)
-    line_bot_api.push_message(
-        LINE_USER_ID,
-        TextSendMessage(text=full_message[:5000])  # LINE上限
-    )
+# テキストメッセージ受信（通知トリガー）
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    text = event.message.text
+    if summary_buffer:
+        full_summary = "\n\n".join(summary_buffer)
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"📝まとめ通知:\n\n{full_summary}"))
+        summary_buffer.clear()
+    else:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
 
-# Webhook
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        entries = list_files()
-        messages = []
-        for entry in entries:
-            if isinstance(entry, dropbox.files.FileMetadata):
-                result = process_file(entry)
-                if result:
-                    messages.append(result)
-        if messages:
-            send_line_notification(messages)
-        return "OK", 200
-    except Exception as e:
-        line_bot_api.push_message(
-            LINE_USER_ID,
-            TextSendMessage(text=f"❌ エラー: {e}")
-        )
-        return "Error", 500
-
+# 起動
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=os.getenv("DEBUG", "false").lower() == "true")
