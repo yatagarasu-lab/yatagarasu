@@ -1,25 +1,19 @@
-# line_utils.py
 import os
-import requests
-from dotenv import load_dotenv
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
 
-load_dotenv()
-LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
+# 環境変数からトークンとユーザーIDを取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")  # Uで始まるID
 
-def push_message_to_line(message):
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    body = {
-        "to": LINE_USER_ID,
-        "messages": [
-            {"type": "text", "text": message}
-        ]
-    }
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
+def notify_user(text):
+    """
+    指定したテキストをLINEのユーザーに送信します。
+    """
     try:
-        requests.post(url, headers=headers, json=body)
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
+        print(f"✅ LINE通知送信完了: {text}")
     except Exception as e:
-        print(f"LINE送信失敗: {str(e)}")
+        print(f"❌ LINE通知エラー: {e}")
