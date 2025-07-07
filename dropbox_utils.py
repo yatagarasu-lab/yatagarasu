@@ -1,47 +1,47 @@
 import os
 import dropbox
-from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-from dropbox.exceptions import AuthError
+import hashlib
 
-# 環境変数からアクセストークンとリフレッシュトークンを取得
-APP_KEY = os.getenv("DROPBOX_APP_KEY")
-APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# Dropbox APIのリフレッシュトークン設定
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
-# Dropbox API クライアント（リフレッシュトークンで認証）
+# Dropboxへの接続
 dbx = dropbox.Dropbox(
-    oauth2_refresh_token=REFRESH_TOKEN,
-    app_key=APP_KEY,
-    app_secret=APP_SECRET
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
 )
 
-FOLDER_PATH = "/Apps/slot-data-analyzer"
+# 対象フォルダ（Apps配下）
+FOLDER_PATH = "/slot-data-analyzer"
 
+# ファイル一覧取得
 def list_files(folder_path=FOLDER_PATH):
-    """Dropboxフォルダ内のファイル一覧を取得"""
     try:
-        res = dbx.files_list_folder(folder_path)
-        return res.entries
-    except AuthError as e:
-        print("Dropbox認証エラー:", e)
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except Exception as e:
+        print(f"❌ ファイル一覧取得エラー: {e}")
         return []
 
+# ファイルダウンロード
 def download_file(path):
-    """Dropboxからファイルをダウンロード"""
     try:
         _, res = dbx.files_download(path)
         return res.content
     except Exception as e:
-        print(f"ファイルダウンロードエラー: {e}")
+        print(f"❌ ダウンロードエラー: {e}")
         return None
 
-def file_hash(data):
-    """ファイル内容のハッシュ値を取得（重複判定用）"""
-    import hashlib
-    return hashlib.md5(data).hexdigest()
+# ハッシュ生成（重複チェック用）
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
 
+# 重複ファイルの検出と処理
 def find_duplicates(folder_path=FOLDER_PATH):
-    """Dropboxフォルダ内の重複ファイルを検出"""
+    print("🔍 Dropbox重複チェック開始...")
     files = list_files(folder_path)
     hash_map = {}
 
@@ -52,8 +52,11 @@ def find_duplicates(folder_path=FOLDER_PATH):
             continue
 
         hash_value = file_hash(content)
+
         if hash_value in hash_map:
             print(f"⚠️ 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            # dbx.files_delete_v2(path)  # ←自動削除するならこの行を有効に
+            # dbx.files_delete_v2(path)  # 本番ではコメント解除
         else:
             hash_map[hash_value] = path
+
+    print("✅ 重複チェック完了")
