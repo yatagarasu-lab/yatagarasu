@@ -1,137 +1,110 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, abort
 import os
-import dropbox
 import hashlib
-from datetime import datetime, timedelta
-import pytz
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
-import openai
-import threading
+import dropbox
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+
+from openai import OpenAI
 import time
-import requests
 
 app = Flask(__name__)
 
-# ====== 環境変数 ======
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-
+# --- 環境変数 ---
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")
-openai.api_key = os.getenv("OPENAI_API_KEY")
-TIMEZONE = pytz.timezone("Asia/Tokyo")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ====== 初期化 ======
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-    app_key=DROPBOX_APP_KEY,
-    app_secret=DROPBOX_APP_SECRET
-)
-
+# --- 初期化 ---
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# ====== ファイルの要約と予測 ======
-def summarize_and_predict(text):
-    prompt = f"""
-これはスロット実戦データまたは設定に関する情報です。
-内容を簡潔に要約し、設定傾向や今後の予測を含めて解釈してください。
-その後、次回の高設定が入りそうな機種または台番号を1つでもいいので予測してください。
+# --- 重複チェック用 ---
+processed_hashes = {}
 
-内容:
-{text}
-
-出力形式：
-【要約】
-...
-【次回予測】
-...
-    """
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    return response.choices[0].message.content.strip()
-
-# ====== ファイルのダウンロード ======
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content.decode("utf-8", errors="ignore")
-
-# ====== ハッシュによる重複チェック ======
-hash_memory = {}
-
-def file_hash(content):
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
-def is_duplicate(file_name, content):
-    h = file_hash(content)
-    if h in hash_memory:
-        return True
-    hash_memory[h] = file_name
-    return False
-
-# ====== 通知処理 ======
-def send_line_message(text):
-    message = TextSendMessage(text=text)
-    line_bot_api.push_message(USER_ID, message)
-
-# ====== Webhook受信時の処理 ======
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    for entry in data["list_folder"]["entries"]:
-        if entry[0] == "file":
-            path = entry[1]
-            try:
-                content = download_file(path)
-                if is_duplicate(path, content):
-                    print(f"重複ファイル検出: {path}")
-                    return jsonify({"status": "duplicate"})
-                result = summarize_and_predict(content)
-                message = f"📂 新規ファイル: {path}\n\n{result}"
-                send_line_message(message)
-            except Exception as e:
-                print("解析失敗:", e)
-    return jsonify({"status": "ok"})
-
-# ====== OpenAI使用量（円換算） ======
-def get_current_usage():
-    try:
-        headers = {
-            "Authorization": f"Bearer {openai.api_key}"
-        }
-        now = datetime.now()
-        start = now.replace(day=1).strftime("%Y-%m-%d")
-        end = now.strftime("%Y-%m-%d")
-        url = f"https://api.openai.com/v1/dashboard/billing/usage?start_date={start}&end_date={end}"
-        res = requests.get(url, headers=headers)
-        usage_usd = res.json().get("total_usage", 0) / 100.0
-        usage_jpy = round(usage_usd * 160, 2)
-        return f"${usage_usd:.2f}（約￥{usage_jpy}）"
-    except Exception as e:
-        return f"取得失敗: {e}"
-
-# ====== 毎週日曜19時に料金通知 ======
-def schedule_billing_notice():
-    def job():
-        while True:
-            now = datetime.now(TIMEZONE)
-            if now.weekday() == 6 and now.hour == 19 and now.minute == 0:
-                usage = get_current_usage()
-                send_line_message(f"💰 今週のOpenAI料金使用状況：\n{usage}")
-            time.sleep(60)
-    threading.Thread(target=job, daemon=True).start()
-
-# ====== アプリ起動時に定期処理スタート ======
-schedule_billing_notice()
-
-# ====== 動作確認用ルート ======
-@app.route("/", methods=["GET"])
+# --- ルート確認用 ---
+@app.route("/", methods=['GET'])
 def index():
-    return "GPT解析BOT 起動中"
+    return "Bot is running"
 
+# --- Dropbox Webhook 受信 ---
+@app.route("/dropbox", methods=['POST'])
+def dropbox_webhook():
+    # Dropboxからの認証リクエストに対応
+    if request.method == 'GET':
+        return request.args.get('challenge')
+
+    # POSTデータの処理開始
+    dbx_path = "/Apps/slot-data-analyzer"
+    try:
+        entries = dbx.files_list_folder(dbx_path).entries
+        for entry in entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                file_path = entry.path_display
+                file_content = dbx.files_download(file_path)[1].content
+                file_hash = hashlib.sha256(file_content).hexdigest()
+
+                # 重複ファイルのスキップ
+                if file_hash in processed_hashes:
+                    continue
+                processed_hashes[file_hash] = True
+
+                # GPT解析
+                result = analyze_with_gpt(file_content)
+
+                # LINE通知
+                push_to_line(f"🧠ファイル解析完了:\n{entry.name}\n\n📊結果:\n{result}")
+
+        return "Processed", 200
+    except Exception as e:
+        push_to_line(f"❌Dropbox処理エラー:\n{str(e)}")
+        return "Error", 500
+
+# --- GPTによるファイル解析 ---
+def analyze_with_gpt(content):
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "以下はDropboxから取得したデータです。内容を簡潔に要約し、重複やノイズがある場合は整理してください。"},
+                {"role": "user", "content": content.decode("utf-8", errors="ignore")}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"GPT解析失敗: {str(e)}"
+
+# --- LINE Webhook受信（Reply対応） ---
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    if event.message.text.lower() in ["こんにちは", "解析して", "データ確認"]:
+        reply_text = "ありがとうございます。データは受信次第、順次解析されます。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
+# --- LINE Push通知関数 ---
+def push_to_line(message):
+    try:
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+    except Exception as e:
+        print(f"LINE通知失敗: {e}")
+
+# --- アプリ起動 ---
 if __name__ == "__main__":
     app.run()
