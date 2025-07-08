@@ -32,7 +32,7 @@ app = Flask(__name__)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
-# Dropboxクライアント（リフレッシュトークンで初期化）
+# Dropboxクライアント
 try:
     dbx = dropbox.Dropbox(
         oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
@@ -81,13 +81,15 @@ def save_file_to_dropbox(file_name, content):
     return path
 
 # ----------------- Webhookエンドポイント -----------------
+@app.route("/", methods=["GET"])
+def index():
+    return "スロット解析BOTは稼働中です。Webhookは正常に待機中。"
+
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        # Dropbox webhook チャレンジ応答
         return request.args.get("challenge", ""), 200
 
-    # LINE webhook
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
     try:
@@ -121,7 +123,7 @@ def handle_image_message(event):
             # 保存
             save_file_to_dropbox(file_name, binary)
 
-            # OCR + GPT解析（テキスト抽出 → 解析）
+            # OCR + GPT解析
             import pytesseract
             from PIL import Image
             from io import BytesIO
@@ -131,14 +133,11 @@ def handle_image_message(event):
                 extracted_text = pytesseract.image_to_string(img, lang='jpn')
                 analysis = analyze_file_content(extracted_text)
                 save_file_to_dropbox(result_file, analysis.encode("utf-8"))
-                reply = f"保存完了: {file_name}\n\n解析結果:\n{analysis[:500]}..."  # 長すぎる場合は先頭500文字
+                reply = f"保存完了: {file_name}\n\n解析結果:\n{analysis[:500]}..."
             except Exception as e:
                 reply = f"画像保存成功\n[解析エラー]: {str(e)}"
 
-        # LINE通知
-        line_bot_api.push_message(LINE_USER_ID, [
-            TextMessage(text=reply)
-        ])
+        line_bot_api.push_message(LINE_USER_ID, [TextMessage(text=reply)])
 
 # ----------------- アプリ起動 -----------------
 if __name__ == "__main__":
