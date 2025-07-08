@@ -1,119 +1,120 @@
-from flask import Flask, request
-import dropbox
-import hashlib
 import os
-import requests
-from datetime import datetime
+import hashlib
 import json
+import dropbox
+import openai
+from flask import Flask, request, abort
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.messaging import (
+    Configuration,
+    ApiClient,
+    MessagingApi,
+    ReplyMessageRequest,
+    TextMessage
+)
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent,
+    ImageMessageContent
+)
 
+# ----------------- 認証情報 -----------------
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# ----------------- 初期設定 -----------------
+openai.api_key = OPENAI_API_KEY
 app = Flask(__name__)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
-# ======================
-# ▼設定（ユーザーごとに変更）
-# ======================
-LINE_USER_ID = "U8da89a1a4e1689bbf7077dbdf0d47521"
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+# Dropboxクライアント
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 
-DROPBOX_CLIENT_ID = os.environ.get("DROPBOX_CLIENT_ID")
-DROPBOX_CLIENT_SECRET = os.environ.get("DROPBOX_CLIENT_SECRET")
-DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
+# ----------------- GPT解析 -----------------
+def analyze_file_content(content: str) -> str:
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "以下のデータを要約・分析し、スロット設定の傾向や注意点を簡潔に教えてください。"},
+                {"role": "user", "content": content}
+            ]
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        return f"[GPT解析エラー] {str(e)}"
 
-DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
+# ----------------- ファイル保存処理 -----------------
+def save_file_to_dropbox(file_name, content):
+    path = f"/Apps/slot-data-analyzer/{file_name}"
+    dbx.files_upload(content, path, mode=dropbox.files.WriteMode.overwrite)
+    return path
 
-# ======================
-# ▼リフレッシュトークン方式でアクセストークン取得
-# ======================
-def get_dropbox_access_token():
-    url = "https://api.dropboxapi.com/oauth2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_CLIENT_ID,
-        "client_secret": DROPBOX_CLIENT_SECRET,
-    }
-    response = requests.post(url, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
-
-# ======================
-# ▼Dropbox操作系
-# ======================
-def list_files(folder_path):
-    access_token = get_dropbox_access_token()
-    dbx = dropbox.Dropbox(access_token)
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
-
-def download_file(path):
-    access_token = get_dropbox_access_token()
-    dbx = dropbox.Dropbox(access_token)
-    metadata, res = dbx.files_download(path)
-    return res.content
-
-def delete_file(path):
-    access_token = get_dropbox_access_token()
-    dbx = dropbox.Dropbox(access_token)
-    dbx.files_delete_v2(path)
-
-# ======================
-# ▼重複チェック用ハッシュ
-# ======================
 def file_hash(content):
     return hashlib.md5(content).hexdigest()
 
-def find_duplicates(folder_path=DROPBOX_FOLDER_PATH):
-    files = list_files(folder_path)
-    hash_map = {}
-    deleted_files = []
-
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            delete_file(path)
-            deleted_files.append(path)
-        else:
-            hash_map[hash_value] = path
-
-    return deleted_files
-
-# ======================
-# ▼LINE通知
-# ======================
-def send_line_message(message):
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}]
-    }
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-
-# ======================
-# ▼Webhookエンドポイント
-# ======================
-@app.route("/", methods=["GET", "POST"])
-def webhook():
+def is_duplicate(content):
     try:
-        deleted = find_duplicates()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if deleted:
-            msg = f"[{now}] 重複ファイルを削除しました:\n" + "\n".join(deleted)
-        else:
-            files = list_files(DROPBOX_FOLDER_PATH)
-            latest_file = sorted(files, key=lambda x: x.server_modified)[-1]
-            msg = f"[{now}] 新規ファイルを検出:\n{latest_file.name}"
-
-        send_line_message(msg)
-        return "OK", 200
-
+        hash_map = {}
+        files = dbx.files_list_folder("/Apps/slot-data-analyzer").entries
+        for f in files:
+            if isinstance(f, dropbox.files.FileMetadata):
+                existing = dbx.files_download(f.path_display)[1].content
+                h = file_hash(existing)
+                if h in hash_map:
+                    continue
+                hash_map[h] = f.path_display
+                if file_hash(content) == h:
+                    return True
+        return False
     except Exception as e:
-        send_line_message(f"エラー発生: {str(e)}")
-        return str(e), 500
+        print("重複チェック失敗:", str(e))
+        return False
+
+# ----------------- Webhookルート -----------------
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return "OK"
+
+# ----------------- メッセージイベント処理 -----------------
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
+    text = event.message.text
+    reply_text = "ありがとうございます"
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.push_message(LINE_USER_ID, [
+            TextMessage(text=reply_text)
+        ])
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    message_id = event.message.id
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        content = line_bot_api.get_message_content(message_id)
+        binary = b"".join(content.iter_content(chunk_size=1024))
+        if is_duplicate(binary):
+            reply = "同じ画像は既に保存済みです。"
+        else:
+            file_name = f"{message_id}.jpg"
+            save_file_to_dropbox(file_name, binary)
+            reply = f"画像を保存しました: {file_name}"
+        line_bot_api.push_message(LINE_USER_ID, [
+            TextMessage(text=reply)
+        ])
+
+# ----------------- アプリ起動（Render用） -----------------
+if __name__ == "__main__":
+    app.run()
