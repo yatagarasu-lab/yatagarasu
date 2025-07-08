@@ -1,6 +1,6 @@
 flask
 gunicorn
-line-bot-sdk
+line-bot-sdk==3.*
 openai
 python-dotenv
 pillow
