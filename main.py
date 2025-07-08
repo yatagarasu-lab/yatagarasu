@@ -1,126 +1,128 @@
+from flask import Flask, request, jsonify
 import os
-import io
-import hashlib
-from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-from dotenv import load_dotenv
 import dropbox
+import hashlib
+from datetime import datetime, timedelta
+import pytz
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
 import openai
-from PIL import Image
-import pytesseract
-from datetime import datetime
-import requests
+import threading
 
-# 環境変数読み込み
-load_dotenv()
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_USER_ID = os.getenv("USER_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
-
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-
-# Dropbox アクセストークン取得関数（リフレッシュ方式）
-def get_dropbox_access_token():
-    response = requests.post(
-        "https://api.dropboxapi.com/oauth2/token",
-        auth=(DROPBOX_APP_KEY, DROPBOX_APP_SECRET),
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": DROPBOX_REFRESH_TOKEN,
-        },
-    )
-    response.raise_for_status()
-    return response.json()["access_token"]
-
-# Dropboxクライアントを毎回取得（トークンの有効性維持）
-def get_dropbox_client():
-    return dropbox.Dropbox(get_dropbox_access_token())
-
-# 初期化
 app = Flask(__name__)
+
+# ====== 環境変数 ======
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+TIMEZONE = pytz.timezone("Asia/Tokyo")
+
+# ====== 初期化 ======
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
 
-# 要約保存バッファ
-summary_buffer = []
+# ====== ファイルの要約と予測 ======
+def summarize_and_predict(text):
+    prompt = f"""
+これはスロット実戦データまたは設定に関する情報です。
+内容を簡潔に要約し、設定傾向や今後の予測を含めて解釈してください。
+その後、次回の高設定が入りそうな機種または台番号を1つでもいいので予測してください。
 
-# Webhook確認用ルート（Dropbox用）
+内容:
+{text}
+
+出力形式：
+【要約】
+...
+【次回予測】
+...
+    """
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+    return response.choices[0].message.content.strip()
+
+# ====== ファイルのダウンロード ======
+def download_file(path):
+    _, res = dbx.files_download(path)
+    return res.content.decode("utf-8", errors="ignore")
+
+# ====== ハッシュによる重複チェック ======
+hash_memory = {}
+
+def file_hash(content):
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+def is_duplicate(file_name, content):
+    h = file_hash(content)
+    if h in hash_memory:
+        return True
+    hash_memory[h] = file_name
+    return False
+
+# ====== 通知処理 ======
+def send_line_message(text):
+    message = TextSendMessage(text=text)
+    line_bot_api.push_message(USER_ID, message)
+
+# ====== Webhook受信時の処理 ======
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    return "OK", 200
+    data = request.get_json()
+    for entry in data["list_folder"]["entries"]:
+        if entry[0] == "file":
+            path = entry[1]
+            try:
+                content = download_file(path)
+                if is_duplicate(path, content):
+                    print(f"重複ファイル検出: {path}")
+                    return jsonify({"status": "duplicate"})
+                result = summarize_and_predict(content)
+                message = f"📂 新規ファイル: {path}\n\n{result}"
+                send_line_message(message)
+            except Exception as e:
+                print("解析失敗:", e)
+    return jsonify({"status": "ok"})
 
-# LINEのWebhook受信エンドポイント
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers["X-Line-Signature"]
-    body = request.get_data(as_text=True)
+# ====== 毎週日曜19時に料金通知 ======
+def schedule_billing_notice():
+    def job():
+        while True:
+            now = datetime.now(TIMEZONE)
+            if now.weekday() == 6 and now.hour == 19 and now.minute == 0:
+                usage = get_current_usage()
+                send_line_message(f"💰 今週のOpenAI料金使用状況：\n{usage}")
+            time.sleep(60)
+    threading.Thread(target=job, daemon=True).start()
+
+# ====== OpenAI使用量（円換算） ======
+def get_current_usage():
     try:
-        handler.handle(body, signature)
+        import requests
+        headers = {
+            "Authorization": f"Bearer {openai.api_key}"
+        }
+        now = datetime.now()
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+        end = now.strftime("%Y-%m-%d")
+        url = f"https://api.openai.com/v1/dashboard/billing/usage?start_date={start}&end_date={end}"
+        res = requests.get(url, headers=headers)
+        usage_usd = res.json().get("total_usage", 0) / 100.0
+        usage_jpy = round(usage_usd * 160, 2)
+        return f"${usage_usd:.2f}（約￥{usage_jpy}）"
     except Exception as e:
-        print(f"エラー: {e}")
-        abort(400)
-    return "OK"
+        return f"取得失敗: {e}"
 
-# 画像メッセージ受信時の処理
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event):
-    try:
-        message_id = event.message.id
-        content = line_bot_api.get_message_content(message_id)
-        image_data = io.BytesIO(content.content)
-        image = Image.open(image_data)
+# ====== アプリ起動時に定期処理スタート ======
+schedule_billing_notice()
 
-        try:
-            text = pytesseract.image_to_string(image, lang="jpn")
-            if not text.strip():
-                text = "（画像から文字を抽出できませんでした）"
-        except Exception as e:
-            text = f"（OCRエラー: {e}）"
+# ====== 動作確認用ルート ======
+@app.route("/", methods=["GET"])
+def index():
+    return "GPT解析BOT 起動中"
 
-        # GPTで要約処理
-        gpt_response = openai.ChatCompletion.create(
-            model=GPT_MODEL,
-            max_tokens=MAX_TOKENS,
-            temperature=TEMPERATURE,
-            messages=[
-                {"role": "system", "content": "以下の日本語文章を簡潔に要約してください。"},
-                {"role": "user", "content": text}
-            ]
-        )
-        summary = gpt_response.choices[0].message["content"]
-
-        # Dropboxへ画像保存
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{timestamp}.jpg"
-        path = f"/Apps/slot-data-analyzer/{filename}"
-        image_data.seek(0)
-        dbx = get_dropbox_client()
-        dbx.files_upload(image_data.read(), path)
-
-        # 要約結果をバッファに追加
-        summary_buffer.append(f"【{timestamp}】\n{summary.strip()}")
-
-    except Exception as e:
-        summary_buffer.append(f"解析失敗: {str(e)}")
-
-# テキスト受信時（通知トリガー）
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text_message(event):
-    if summary_buffer:
-        full_summary = "\n\n".join(summary_buffer)
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=f"📝まとめ通知:\n\n{full_summary}"))
-        summary_buffer.clear()
-    else:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ありがとうございます"))
-
-# アプリ起動
 if __name__ == "__main__":
-    app.run(debug=os.getenv("DEBUG", "false").lower() == "true")
+    app.run()
