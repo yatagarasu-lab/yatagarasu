@@ -1,129 +1,107 @@
 import os
 import hashlib
-import dropbox
-import openai
-import pytz
-import requests
-from PIL import Image
+import tempfile
 from flask import Flask, request, abort
-from datetime import datetime
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
+import openai
+import dropbox
+from dropbox.files import WriteMode
 from dotenv import load_dotenv
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
+from PIL import Image
+import pytesseract
+from io import BytesIO
 
-# .envの読み込み
 load_dotenv()
 
-# 各種キー設定
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-user_id = os.getenv("LINE_USER_ID")
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# Flask アプリの初期化
+# 初期設定
 app = Flask(__name__)
-
-# LINE設定
-configuration = Configuration(access_token=channel_access_token)
-handler = WebhookHandler(channel_secret)
-
-# Dropbox クライアント初期化（強化版）
-def get_dropbox_client():
-    refresh_token = os.getenv("DROPBOX_REFRESH_TOKEN")
-    app_key = os.getenv("DROPBOX_APP_KEY")
-    app_secret = os.getenv("DROPBOX_APP_SECRET")
-
-    if refresh_token and app_key and app_secret:
-        return dropbox.Dropbox(
-            oauth2_refresh_token=refresh_token,
-            app_key=app_key,
-            app_secret=app_secret
-        )
-    else:
-        # 古いアクセストークン方式にも対応
-        access_token = os.getenv("DROPBOX_TOKEN")
-        if access_token:
-            return dropbox.Dropbox(access_token)
-        else:
-            raise Exception("Dropbox認証情報が設定されていません")
-
-dbx = get_dropbox_client()
-
-# 画像保存用フォルダ名
+line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
+handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+user_id = os.environ.get("LINE_USER_ID")  # LINE Push用
+openai.api_key = os.environ["OPENAI_API_KEY"]
+DROPBOX_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
 
-# ファイル保存
-def save_file_to_dropbox(file_data, file_name):
-    path = f"{DROPBOX_FOLDER}/{file_name}"
-    dbx.files_upload(file_data, path, mode=dropbox.files.WriteMode("overwrite"))
+# GPT解析処理
+def analyze_text_with_gpt(text):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": text}],
+            max_tokens=800
+        )
+        return response.choices[0].message["content"].strip()
+    except Exception as e:
+        return f"[GPT解析エラー] {str(e)}"
 
-# ハッシュ生成で重複判定
-def file_hash(data):
-    return hashlib.md5(data).hexdigest()
+# Dropboxへアップロード
+def upload_to_dropbox(filename, content):
+    path = f"{DROPBOX_FOLDER}/{filename}"
+    dbx.files_upload(content, path, mode=WriteMode("overwrite"))
 
-# 重複ファイルチェック
-def find_duplicates(folder_path=DROPBOX_FOLDER):
-    files = dbx.files_list_folder(folder_path).entries
-    hash_map = {}
-    for file in files:
-        path = file.path_display
-        _, res = dbx.files_download(path)
-        content = res.content
-        h = file_hash(content)
-        if h in hash_map:
-            print(f"重複ファイル検出: {path} = {hash_map[h]}")
-            dbx.files_delete_v2(path)
-        else:
-            hash_map[h] = path
+# 重複ファイルの検出
+def is_duplicate(content_bytes):
+    current_hash = hashlib.sha256(content_bytes).hexdigest()
+    try:
+        files = dbx.files_list_folder(DROPBOX_FOLDER).entries
+        for f in files:
+            _, ext = os.path.splitext(f.name)
+            if ext.lower() in [".txt", ".jpeg", ".jpg", ".png"]:
+                md = dbx.files_download(f.path_lower)[1].content
+                if hashlib.sha256(md).hexdigest() == current_hash:
+                    return True
+    except Exception as e:
+        print(f"[重複確認エラー] {e}")
+    return False
 
-# LINE Webhook受信エンドポイント
-@app.route("/callback", methods=['POST'])
-def callback():
+# OCR処理
+def extract_text_from_image(img_bytes):
+    try:
+        image = Image.open(BytesIO(img_bytes))
+        text = pytesseract.image_to_string(image, lang="jpn+eng")
+        return text
+    except Exception as e:
+        return f"[OCRエラー] {str(e)}"
+
+# LINE webhook
+@app.route("/webhook", methods=["POST"])
+def webhook():
     signature = request.headers.get("X-Line-Signature")
     if signature is None:
-        print("⚠️ シグネチャが見つかりません。リクエストを拒否します。")
-        abort(400)
+        return "NO SIGNATURE", 400
+
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-    return 'OK'
+    return "OK"
 
-# イベント処理
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_text_message(event):
+# LINEイベントハンドラ
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text(event):
     text = event.message.text
-    timestamp = datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y%m%d_%H%M%S')
-    filename = f"text_{timestamp}.txt"
-    save_file_to_dropbox(text.encode(), filename)
-    send_thanks(event.reply_token)
+    content = text.encode("utf-8")
+    if is_duplicate(content):
+        return
+    upload_to_dropbox("text_" + event.timestamp.strftime("%Y%m%d%H%M%S") + ".txt", content)
+    analysis = analyze_text_with_gpt(text)
+    line_bot_api.push_message(user_id, TextSendMessage(text=analysis))
 
-@handler.add(MessageEvent, message=ImageMessageContent)
-def handle_image_message(event):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        message_content = line_bot_api.get_message_content(event.message.id)
-        image_data = b''.join(chunk for chunk in message_content.iter_content())
-    timestamp = datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y%m%d_%H%M%S')
-    filename = f"image_{timestamp}.jpg"
-    save_file_to_dropbox(image_data, filename)
-    find_duplicates()
-    send_thanks(event.reply_token)
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    message_content = line_bot_api.get_message_content(event.message.id)
+    img_bytes = b"".join(chunk for chunk in message_content.iter_content())
+    if is_duplicate(img_bytes):
+        return
+    upload_to_dropbox("image_" + event.timestamp.strftime("%Y%m%d%H%M%S") + ".jpg", img_bytes)
+    ocr_text = extract_text_from_image(img_bytes)
+    analysis = analyze_text_with_gpt(ocr_text)
+    line_bot_api.push_message(user_id, TextSendMessage(text=analysis))
 
-# 返信メッセージ
-def send_thanks(token):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=token,
-                messages=[TextMessage(text="ありがとうございます")]
-            )
-        )
-
-# アプリ起動
+# Render用ポート設定
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
