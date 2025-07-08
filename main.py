@@ -1,6 +1,5 @@
 import os
 import hashlib
-import json
 import dropbox
 import openai
 from flask import Flask, request, abort
@@ -50,7 +49,7 @@ def analyze_file_content(content: str) -> str:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "以下のデータを要約・分析し、スロット設定の傾向や注意点を簡潔に教えてください。"},
+                {"role": "system", "content": "以下のスロット情報を要約・分析して、設定の傾向・注意点を簡潔に述べてください。"},
                 {"role": "user", "content": content}
             ]
         )
@@ -58,46 +57,37 @@ def analyze_file_content(content: str) -> str:
     except Exception as e:
         return f"[GPT解析エラー] {str(e)}"
 
-# ----------------- Dropboxファイル処理 -----------------
-def save_file_to_dropbox(file_name, content):
-    if dbx is None:
-        raise RuntimeError("Dropboxクライアントが初期化されていません")
-    path = f"/Apps/slot-data-analyzer/{file_name}"
-    dbx.files_upload(content, path, mode=dropbox.files.WriteMode.overwrite)
-    return path
-
+# ----------------- Dropbox 処理 -----------------
 def file_hash(content):
     return hashlib.md5(content).hexdigest()
 
 def is_duplicate(content):
     try:
-        hash_map = {}
         files = dbx.files_list_folder("/Apps/slot-data-analyzer").entries
+        current_hash = file_hash(content)
         for f in files:
             if isinstance(f, dropbox.files.FileMetadata):
-                existing = dbx.files_download(f.path_display)[1].content
-                h = file_hash(existing)
-                if h in hash_map:
-                    continue
-                hash_map[h] = f.path_display
-                if file_hash(content) == h:
+                _, res = dbx.files_download(f.path_display)
+                if file_hash(res.content) == current_hash:
                     return True
         return False
     except Exception as e:
         print("重複チェック失敗:", str(e))
         return False
 
-# ----------------- Webhook（LINE + Dropbox） -----------------
+def save_file_to_dropbox(file_name, content):
+    path = f"/Apps/slot-data-analyzer/{file_name}"
+    dbx.files_upload(content, path, mode=dropbox.files.WriteMode.overwrite)
+    return path
+
+# ----------------- Webhookエンドポイント -----------------
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # Dropbox webhook チャレンジ検証（GETで来る）
     if request.method == "GET":
-        challenge = request.args.get("challenge")
-        if challenge:
-            return challenge, 200
-        return "No challenge found", 400
+        # Dropbox webhook チャレンジ応答
+        return request.args.get("challenge", ""), 200
 
-    # LINE webhook（POST）
+    # LINE webhook
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
     try:
@@ -112,29 +102,44 @@ def handle_text_message(event):
     reply_text = "ありがとうございます"
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(LINE_USER_ID, [
-            TextMessage(text=reply_text)
-        ])
+        line_bot_api.push_message(LINE_USER_ID, [TextMessage(text=reply_text)])
 
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     message_id = event.message.id
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        content = line_bot_api.get_message_content(message_id)
-        binary = b"".join(content.iter_content(chunk_size=1024))
+        content_response = line_bot_api.get_message_content(message_id)
+        binary = b"".join(content_response.iter_content(chunk_size=1024))
+
         if is_duplicate(binary):
-            reply = "同じ画像は既に保存済みです。"
+            reply = "同じ画像はすでに保存済みです。"
         else:
             file_name = f"{message_id}.jpg"
+            result_file = f"{message_id}_result.txt"
+
+            # 保存
             save_file_to_dropbox(file_name, binary)
-            reply = f"画像を保存しました: {file_name}"
+
+            # OCR + GPT解析（テキスト抽出 → 解析）
+            import pytesseract
+            from PIL import Image
+            from io import BytesIO
+
+            try:
+                img = Image.open(BytesIO(binary))
+                extracted_text = pytesseract.image_to_string(img, lang='jpn')
+                analysis = analyze_file_content(extracted_text)
+                save_file_to_dropbox(result_file, analysis.encode("utf-8"))
+                reply = f"保存完了: {file_name}\n\n解析結果:\n{analysis[:500]}..."  # 長すぎる場合は先頭500文字
+            except Exception as e:
+                reply = f"画像保存成功\n[解析エラー]: {str(e)}"
+
+        # LINE通知
         line_bot_api.push_message(LINE_USER_ID, [
             TextMessage(text=reply)
         ])
 
-# ----------------- アプリ起動（Render対応） -----------------
+# ----------------- アプリ起動 -----------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Flaskアプリ起動 (port={port})")
-    app.run(host="0.0.0.0", port=port)
+    app.run()
