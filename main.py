@@ -1,103 +1,129 @@
 import os
 import hashlib
-import base64
 import dropbox
+import openai
+import pytz
+import requests
+from PIL import Image
 from flask import Flask, request, abort
-
+from datetime import datetime
+from dotenv import load_dotenv
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import Configuration, ApiClient, MessagingApi
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
+from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageContent
 
-from openai import OpenAI
+# .envの読み込み
+load_dotenv()
 
+# 各種キー設定
+channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+channel_secret = os.getenv("LINE_CHANNEL_SECRET")
+user_id = os.getenv("LINE_USER_ID")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Flask アプリの初期化
 app = Flask(__name__)
 
 # LINE設定
-channel_secret = os.getenv("LINE_CHANNEL_SECRET")
-channel_access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-user_id = os.getenv("LINE_USER_ID")
-
 configuration = Configuration(access_token=channel_access_token)
 handler = WebhookHandler(channel_secret)
 
-# OpenAI設定
-openai_api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=openai_api_key)
+# Dropbox クライアント初期化（強化版）
+def get_dropbox_client():
+    refresh_token = os.getenv("DROPBOX_REFRESH_TOKEN")
+    app_key = os.getenv("DROPBOX_APP_KEY")
+    app_secret = os.getenv("DROPBOX_APP_SECRET")
 
-# Dropbox設定
-dropbox_token = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(dropbox_token)
+    if refresh_token and app_key and app_secret:
+        return dropbox.Dropbox(
+            oauth2_refresh_token=refresh_token,
+            app_key=app_key,
+            app_secret=app_secret
+        )
+    else:
+        # 古いアクセストークン方式にも対応
+        access_token = os.getenv("DROPBOX_TOKEN")
+        if access_token:
+            return dropbox.Dropbox(access_token)
+        else:
+            raise Exception("Dropbox認証情報が設定されていません")
 
-# GPT解析関数
-def analyze_with_gpt(text):
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "これはLINEやDropboxから送られた分析データです。要約・分析してください。"},
-            {"role": "user", "content": text}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+dbx = get_dropbox_client()
 
-# Dropbox保存
-def save_to_dropbox(filename, content):
-    path = f"/Apps/slot-data-analyzer/{filename}"
-    dbx.files_upload(content.encode("utf-8"), path, mode=dropbox.files.WriteMode.overwrite)
+# 画像保存用フォルダ名
+DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
 
-# 署名検証付きLINE処理
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# ファイル保存
+def save_file_to_dropbox(file_data, file_name):
+    path = f"{DROPBOX_FOLDER}/{file_name}"
+    dbx.files_upload(file_data, path, mode=dropbox.files.WriteMode("overwrite"))
+
+# ハッシュ生成で重複判定
+def file_hash(data):
+    return hashlib.md5(data).hexdigest()
+
+# 重複ファイルチェック
+def find_duplicates(folder_path=DROPBOX_FOLDER):
+    files = dbx.files_list_folder(folder_path).entries
+    hash_map = {}
+    for file in files:
+        path = file.path_display
+        _, res = dbx.files_download(path)
+        content = res.content
+        h = file_hash(content)
+        if h in hash_map:
+            print(f"重複ファイル検出: {path} = {hash_map[h]}")
+            dbx.files_delete_v2(path)
+        else:
+            hash_map[h] = path
+
+# LINE Webhook受信エンドポイント
+@app.route("/callback", methods=['POST'])
+def callback():
     signature = request.headers.get("X-Line-Signature")
+    if signature is None:
+        print("⚠️ シグネチャが見つかりません。リクエストを拒否します。")
+        abort(400)
     body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
 
-    if signature:
-        try:
-            handler.handle(body, signature)
-        except InvalidSignatureError:
-            abort(400)
-        return "OK"
-
-    # ← 署名なし：Dropbox通知や手動送信テキスト等として処理
-    print("署名なしリクエスト受信：GPT解析へ回します")
-    data = request.get_json()
-
-    # 内容を文字列化して解析
-    raw_text = str(data)
-    result = analyze_with_gpt(raw_text)
-
-    # Dropboxに保存
-    filename = f"dropbox_analysis_{hashlib.md5(raw_text.encode()).hexdigest()[:8]}.txt"
-    save_to_dropbox(filename, result)
-
-    # LINEに返信（Push通知）
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(user_id, [
-            {
-                "type": "text",
-                "text": f"Dropbox通知を解析しました：\n{result[:100]}..."
-            }
-        ])
-
-    return "OK", 200
-
-# LINEでテキスト受信時の処理
+# イベント処理
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     text = event.message.text
-    result = analyze_with_gpt(text)
+    timestamp = datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y%m%d_%H%M%S')
+    filename = f"text_{timestamp}.txt"
+    save_file_to_dropbox(text.encode(), filename)
+    send_thanks(event.reply_token)
 
-    # Dropbox保存
-    filename = f"line_message_{hashlib.md5(text.encode()).hexdigest()[:8]}.txt"
-    save_to_dropbox(filename, result)
-
-    # LINE返信
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(event.reply_token, [
-            {
-                "type": "text",
-                "text": f"ありがとうございます"
-            }
-        ])
+        message_content = line_bot_api.get_message_content(event.message.id)
+        image_data = b''.join(chunk for chunk in message_content.iter_content())
+    timestamp = datetime.now(pytz.timezone('Asia/Tokyo')).strftime('%Y%m%d_%H%M%S')
+    filename = f"image_{timestamp}.jpg"
+    save_file_to_dropbox(image_data, filename)
+    find_duplicates()
+    send_thanks(event.reply_token)
+
+# 返信メッセージ
+def send_thanks(token):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=token,
+                messages=[TextMessage(text="ありがとうございます")]
+            )
+        )
+
+# アプリ起動
+if __name__ == "__main__":
+    app.run()
