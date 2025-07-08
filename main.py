@@ -133,6 +133,8 @@ def handle_image_message(event):
             TextMessage(text=reply)
         ])
 
-# ----------------- アプリ起動（Render） -----------------
+# ----------------- アプリ起動（Render対応） -----------------
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Flaskアプリ起動 (port={port})")
+    app.run(host="0.0.0.0", port=port)
