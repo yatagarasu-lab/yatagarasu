@@ -10,7 +10,6 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    ReplyMessageRequest,
     TextMessage
 )
 from linebot.v3.webhooks import (
@@ -24,8 +23,6 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# Dropbox用（リフレッシュトークン方式）
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
@@ -61,7 +58,7 @@ def analyze_file_content(content: str) -> str:
     except Exception as e:
         return f"[GPT解析エラー] {str(e)}"
 
-# ----------------- ファイル保存処理 -----------------
+# ----------------- Dropboxファイル処理 -----------------
 def save_file_to_dropbox(file_name, content):
     if dbx is None:
         raise RuntimeError("Dropboxクライアントが初期化されていません")
@@ -90,9 +87,17 @@ def is_duplicate(content):
         print("重複チェック失敗:", str(e))
         return False
 
-# ----------------- Webhookルート -----------------
-@app.route("/webhook", methods=["POST"])
+# ----------------- Webhook（LINE + Dropbox） -----------------
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    # Dropbox webhook チャレンジ検証（GETで来る）
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        if challenge:
+            return challenge, 200
+        return "No challenge found", 400
+
+    # LINE webhook（POST）
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
     try:
@@ -101,7 +106,7 @@ def webhook():
         abort(400)
     return "OK"
 
-# ----------------- メッセージイベント処理 -----------------
+# ----------------- LINE メッセージ処理 -----------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     reply_text = "ありがとうございます"
@@ -128,6 +133,6 @@ def handle_image_message(event):
             TextMessage(text=reply)
         ])
 
-# ----------------- アプリ起動（Render用） -----------------
+# ----------------- アプリ起動（Render） -----------------
 if __name__ == "__main__":
     app.run()
