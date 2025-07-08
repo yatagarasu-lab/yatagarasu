@@ -39,15 +39,23 @@ def get_dropbox_access_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
+# Dropboxクライアントを毎回取得（トークンの有効性維持）
+def get_dropbox_client():
+    return dropbox.Dropbox(get_dropbox_access_token())
+
 # 初期化
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
-dbx = dropbox.Dropbox(get_dropbox_access_token())
 
-# 一時的に要約を保存するバッファ
+# 要約保存バッファ
 summary_buffer = []
+
+# Webhook確認用ルート（Dropbox用）
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    return "OK", 200
 
 # LINEのWebhook受信エンドポイント
 @app.route("/callback", methods=["POST"])
@@ -94,6 +102,7 @@ def handle_image_message(event):
         filename = f"{timestamp}.jpg"
         path = f"/Apps/slot-data-analyzer/{filename}"
         image_data.seek(0)
+        dbx = get_dropbox_client()
         dbx.files_upload(image_data.read(), path)
 
         # 要約結果をバッファに追加
