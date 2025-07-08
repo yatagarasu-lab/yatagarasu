@@ -23,8 +23,12 @@ from linebot.v3.webhooks import (
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Dropbox用（リフレッシュトークン方式）
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
 # ----------------- 初期設定 -----------------
 openai.api_key = OPENAI_API_KEY
@@ -32,8 +36,16 @@ app = Flask(__name__)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
-# Dropboxクライアント
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+# Dropboxクライアント（リフレッシュトークンで初期化）
+try:
+    dbx = dropbox.Dropbox(
+        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+        app_key=DROPBOX_APP_KEY,
+        app_secret=DROPBOX_APP_SECRET
+    )
+except Exception as e:
+    print("Dropbox認証エラー:", e)
+    dbx = None
 
 # ----------------- GPT解析 -----------------
 def analyze_file_content(content: str) -> str:
@@ -51,6 +63,8 @@ def analyze_file_content(content: str) -> str:
 
 # ----------------- ファイル保存処理 -----------------
 def save_file_to_dropbox(file_name, content):
+    if dbx is None:
+        raise RuntimeError("Dropboxクライアントが初期化されていません")
     path = f"/Apps/slot-data-analyzer/{file_name}"
     dbx.files_upload(content, path, mode=dropbox.files.WriteMode.overwrite)
     return path
@@ -90,7 +104,6 @@ def webhook():
 # ----------------- メッセージイベント処理 -----------------
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    text = event.message.text
     reply_text = "ありがとうございます"
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
