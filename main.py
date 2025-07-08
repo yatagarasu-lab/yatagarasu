@@ -8,18 +8,28 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import openai
 import threading
+import time
+import requests
 
 app = Flask(__name__)
 
 # ====== 環境変数 ======
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 USER_ID = os.getenv("LINE_USER_ID")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 TIMEZONE = pytz.timezone("Asia/Tokyo")
 
 # ====== 初期化 ======
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
+
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
 # ====== ファイルの要約と予測 ======
@@ -87,21 +97,9 @@ def webhook():
                 print("解析失敗:", e)
     return jsonify({"status": "ok"})
 
-# ====== 毎週日曜19時に料金通知 ======
-def schedule_billing_notice():
-    def job():
-        while True:
-            now = datetime.now(TIMEZONE)
-            if now.weekday() == 6 and now.hour == 19 and now.minute == 0:
-                usage = get_current_usage()
-                send_line_message(f"💰 今週のOpenAI料金使用状況：\n{usage}")
-            time.sleep(60)
-    threading.Thread(target=job, daemon=True).start()
-
 # ====== OpenAI使用量（円換算） ======
 def get_current_usage():
     try:
-        import requests
         headers = {
             "Authorization": f"Bearer {openai.api_key}"
         }
@@ -115,6 +113,17 @@ def get_current_usage():
         return f"${usage_usd:.2f}（約￥{usage_jpy}）"
     except Exception as e:
         return f"取得失敗: {e}"
+
+# ====== 毎週日曜19時に料金通知 ======
+def schedule_billing_notice():
+    def job():
+        while True:
+            now = datetime.now(TIMEZONE)
+            if now.weekday() == 6 and now.hour == 19 and now.minute == 0:
+                usage = get_current_usage()
+                send_line_message(f"💰 今週のOpenAI料金使用状況：\n{usage}")
+            time.sleep(60)
+    threading.Thread(target=job, daemon=True).start()
 
 # ====== アプリ起動時に定期処理スタート ======
 schedule_billing_notice()
