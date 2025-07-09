@@ -1,6 +1,6 @@
 flask
 gunicorn
-line-bot-sdk==3.4.0
+line-bot-sdk
 openai
 python-dotenv
 pillow
@@ -10,3 +10,5 @@ requests
 tenacity
 pytz
 numpy
+tqdm
+certifi
