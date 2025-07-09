@@ -1,37 +1,25 @@
-import mimetypes
-from openai import OpenAI
-import os
+import openai
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def summarize_and_tag_text(text: str):
+    try:
+        system_prompt = (
+            "あなたは、Dropboxに追加されたスロットに関する情報を分析するAIです。\n"
+            "入力されたテキストをできるだけ短く要約し、重要なキーワード（機種名、台番、示唆内容など）を抽出してください。\n"
+            "出力形式は以下：\n\n"
+            "【要約】\n...\n\n【タグ】\n...\n"
+        )
 
-def analyze_file(file_path):
-    mime_type, _ = mimetypes.guess_type(file_path)
-    file_name = os.path.basename(file_path)
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.3,
+            max_tokens=500
+        )
 
-    if mime_type and mime_type.startswith("image/"):
-        # 画像ファイルの場合 → ChatGPT Visionを使う
-        with open(file_path, "rb") as image_file:
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "あなたはパチスロの設定判別を支援するAIです。画像内のスランプグラフや文字情報を読み取り、設定の傾向を分析してください。"},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime_type};base64,{image_file.read().encode('base64').decode()}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=1000,
-            )
         return response.choices[0].message.content.strip()
 
-    else:
-        # その他ファイル（例：PDF、テキスト）はプレーンテキストとして処理（必要なら後日対応）
-        return f"{file_name} は画像ではありません。現在、画像のみ解析に対応しています。"
+    except Exception as e:
+        return f"[要約失敗]: {e}"
