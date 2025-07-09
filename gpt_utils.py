@@ -1,49 +1,30 @@
 import openai
 import os
-from line_utils import push_message
 
-# OpenAIの設定
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def analyze_and_notify(filename, content):
+def summarize_and_tag_text(text):
+    """
+    GPTで要約とタグ付けを行う
+    """
     try:
-        print(f"🧠 GPT解析開始: {filename}")
+        system_prompt = (
+            "以下のテキストから要点を簡潔にまとめて、"
+            "最後に関連するキーワードをハッシュタグ形式で3つ付けてください。"
+        )
+        user_prompt = f"内容：\n{text}"
 
-        # バイナリ → テキスト（画像 or テキストファイル対応）
-        if filename.lower().endswith((".png", ".jpg", ".jpeg")):
-            base64_data = content.encode("base64")  # ※古いPythonならbase64.b64encode
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_data}",
-                                },
-                            },
-                            {"type": "text", "text": "この画像の要点を要約してください。"}
-                        ],
-                    }
-                ],
-            )
-            summary = response.choices[0].message.content.strip()
-        else:
-            text = content.decode("utf-8", errors="ignore")
-            response = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "あなたは優秀な要約AIです。"},
-                    {"role": "user", "content": f"以下を要約してください:\n\n{text}"}
-                ],
-            )
-            summary = response.choices[0].message.content.strip()
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=500,
+            temperature=0.5
+        )
 
-        print("✅ GPT要約完了")
-        push_message(f"📂 {filename} の要約:\n{summary}")
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print(f"❌ GPT解析中にエラー: {e}")
-        push_message(f"⚠️ GPT解析エラー: {filename}")
+        return f"[GPT要約失敗] {e}"
