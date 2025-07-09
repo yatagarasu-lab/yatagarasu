@@ -1,25 +1,37 @@
-import openai
+import os
+from utils.ocr_utils import extract_text_from_image
+from utils.gpt_utils import summarize_and_tag_text
+from utils.line_utils import send_custom_line_notification
+from utils.dropbox_utils import move_file_to_month_folder
 
-def summarize_and_tag_text(text: str):
+# 環境変数からLINEユーザーIDを取得（Push通知宛先）
+USER_ID = os.getenv("LINE_USER_ID")
+
+def analyze_file(file_path):
+    """
+    Dropboxにアップされたファイルを解析し、要約とLINE通知を実行する。
+    1. OCRで画像からテキスト抽出
+    2. GPTで要約＋タグ生成
+    3. Dropbox内でファイルを月別仕分けに移動
+    4. LINEへ通知を送信
+    """
     try:
-        system_prompt = (
-            "あなたは、Dropboxに追加されたスロットに関する情報を分析するAIです。\n"
-            "入力されたテキストをできるだけ短く要約し、重要なキーワード（機種名、台番、示唆内容など）を抽出してください。\n"
-            "出力形式は以下：\n\n"
-            "【要約】\n...\n\n【タグ】\n...\n"
-        )
+        # 1. OCRでテキスト抽出
+        extracted_text = extract_text_from_image(file_path)
 
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
+        if not extracted_text.strip():
+            extracted_text = "画像内から読み取れる文字がありませんでした。"
 
-        return response.choices[0].message.content.strip()
+        # 2. GPTで要約とタグ付け
+        summary = summarize_and_tag_text(extracted_text)
+
+        # 3. Dropboxで月別フォルダへ移動
+        new_path = move_file_to_month_folder(file_path)
+
+        # 4. LINE通知送信
+        send_custom_line_notification(USER_ID, summary, new_path)
+
+        print(f"[OK] ファイル解析完了: {new_path}")
 
     except Exception as e:
-        return f"[要約失敗]: {e}"
+        print(f"[ERROR] ファイル解析中にエラーが発生: {e}")
