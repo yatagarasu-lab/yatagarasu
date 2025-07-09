@@ -1,10 +1,34 @@
-from datetime import datetime
-import dropbox
 import os
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+from utils import reply_text_message, reply_image_message
+import dropbox
+from datetime import datetime
 
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 DROPBOX_LOG_FOLDER = "/logs"
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+
+def handle_text_event(event: MessageEvent):
+    user_id = event.source.user_id
+    user_text = event.message.text
+
+    # ChatGPT応答
+    reply_text = reply_text_message(user_text)
+
+    # LINEへ返信
+    reply_image_message(event.reply_token, reply_text)
+
+    # Dropboxログ保存
+    log_message_to_dropbox(user_id, user_text, reply_text)
+
+
+def handle_image_event(event: MessageEvent):
+    user_id = event.source.user_id
+    reply_text = "画像を受け取りました（解析準備中）"
+    reply_image_message(event.reply_token, reply_text)
+
+    # ログにも画像受付情報を記録
+    log_message_to_dropbox(user_id, "[画像]", reply_text)
 
 
 def log_message_to_dropbox(user_id, user_text, reply_text):
