@@ -1,47 +1,23 @@
-from flask import Blueprint, request
-import os
-from analyze_file import analyze_and_notify
-import hmac
-import hashlib
-import datetime
-import pytz
+from flask import Blueprint, request, abort
+from linebot import WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from log_utils import delete_old_logs  # ログ削除関数のインポート
 
-webhook_bp = Blueprint("dropbox_webhook", __name__)
+webhook_bp = Blueprint("webhook", __name__)
+handler = WebhookHandler("YOUR_CHANNEL_SECRET")
 
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-
-# 夜間判定（22:00～翌6:00 のみ実行許可）
-def is_nighttime():
-    tz = pytz.timezone("Asia/Tokyo")
-    now = datetime.datetime.now(tz).time()
-    return now >= datetime.time(22, 0) or now <= datetime.time(6, 0)
-
-# Dropbox webhookの検証用（GET）
-@webhook_bp.route("/webhook", methods=["GET"])
-def verify():
-    challenge = request.args.get("challenge")
-    return challenge, 200
-
-# Dropbox webhookイベント受信（POST）
 @webhook_bp.route("/webhook", methods=["POST"])
 def webhook():
-    # セキュリティチェック（署名の検証）
-    signature = request.headers.get("X-Dropbox-Signature")
-    expected = hmac.new(
-        key=DROPBOX_APP_SECRET.encode(),
-        msg=request.data,
-        digestmod=hashlib.sha256,
-    ).hexdigest()
+    # リクエストの検証
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
 
-    if not hmac.compare_digest(signature, expected):
-        return "Invalid signature", 403
-
-    if not is_nighttime():
-        return "昼間のため解析をスキップ", 200
-
-    # メイン処理：Dropbox内の新ファイルを解析＆通知
     try:
-        analyze_and_notify()
-        return "解析＆通知 実行", 200
-    except Exception as e:
-        return f"Error during processing: {str(e)}", 500
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    # ログ削除をここでも実行（main.pyと重複しても問題なし）
+    delete_old_logs()
+
+    return "OK"
