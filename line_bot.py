@@ -1,51 +1,42 @@
 from flask import Blueprint, request
-from linebot import LineBotApi, WebhookParser
+from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
-import datetime
-import pytz
+from utils.logger import log_event
 
-# LINE設定
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+line_bp = Blueprint("line_bp", __name__)
+
+# 環境変数からLINEの設定を取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")  # Push送信用
-
-line_bp = Blueprint("line_bot", __name__)
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-parser = WebhookParser(LINE_CHANNEL_SECRET)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 夜間判定（22:00～翌6:00のみ許可）
-def is_nighttime():
-    tz = pytz.timezone('Asia/Tokyo')
-    now = datetime.datetime.now(tz).time()
-    return now >= datetime.time(22, 0) or now <= datetime.time(6, 0)
-
-# LINE Webhook受信処理（応答専用）
-@line_bp.route("/line", methods=["POST"])
+@line_bp.route("/callback", methods=["POST"])
 def callback():
-    if not is_nighttime():
-        return "昼間のため応答制限中", 200
-
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
 
-    try:
-        events = parser.parse(body, signature)
-    except InvalidSignatureError:
-        return "Invalid signature", 400
+    log_event("LINE Webhook Received:\n" + body)
 
-    for event in events:
-        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="ありがとうございます")
-            )
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        log_event("⚠️ Invalid signature")
+        return "Invalid signature", 400
 
     return "OK", 200
 
-# LINE Push通知用
-def push_line_message(message):
-    if is_nighttime():  # 夜間のみ送信許可
-        line_bot_api.push_message(USER_ID, TextSendMessage(text=message))
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_message = event.message.text
+    log_event(f"User Message: {user_message}")
+
+    # 応答メッセージを固定（将来ここにGPT応答を追加可能）
+    reply_text = "ありがとうございます"
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
