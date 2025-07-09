@@ -12,7 +12,7 @@ numpy==1.26.4
 tqdm==4.66.4
 certifi==2024.6.2
 
-# OCRに必要（画像認識）
+# OCR用ライブラリ
 easyocr==1.7.1
 scikit-image==0.22.0
 torch==2.3.0
