@@ -1,25 +1,31 @@
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
 import os
+import requests
 
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+LINE_API_URL = "https://api.line.me/v2/bot/message/push"
+CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
-def send_custom_line_notification(user_id, summary, path):
+def send_custom_line_notification(user_id, summary_text, dropbox_path):
     """
-    GPTからの要約とDropboxの保存先を含むカスタム通知をLINEに送信
+    LINE Push通知をカスタムで送信
     """
     try:
-        tag_part = summary.split("【タグ】")[1].strip()
-        summary_part = summary.split("【タグ】")[0].replace("【要約】", "").strip()
-    except:
-        tag_part = "タグなし"
-        summary_part = summary.strip()
+        headers = {
+            "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
 
-    message = (
-        "📩 新しいスロット情報を受信しました！\n\n"
-        f"📝 要約：\n{summary_part}\n\n"
-        f"🏷 タグ：\n{tag_part}\n\n"
-        f"📁 保存先：{path}"
-    )
-    line_bot_api.push_message(user_id, TextSendMessage(text=message))
+        message = {
+            "to": user_id,
+            "messages": [
+                {
+                    "type": "text",
+                    "text": f"📝新しい解析結果が届きました！\n\n📄 要約:\n{summary_text}\n\n📁 保存先:\n{dropbox_path}"
+                }
+            ]
+        }
+
+        response = requests.post(LINE_API_URL, headers=headers, json=message)
+        response.raise_for_status()
+
+    except Exception as e:
+        print(f"[LINE通知エラー] {e}")
