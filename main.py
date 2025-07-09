@@ -3,8 +3,12 @@ from webhook import webhook_bp
 from line_bot import line_bp
 import os
 from dotenv import load_dotenv
+from log_utils import delete_old_logs
 
 load_dotenv()
+
+# ログ削除（7日以上前の.logファイルを削除）
+delete_old_logs()
 
 app = Flask(__name__)
 
