@@ -1,107 +1,139 @@
 import os
 import hashlib
-import tempfile
+import json
+import requests
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
-import openai
+from linebot.models import TextSendMessage
 import dropbox
 from dropbox.files import WriteMode
-from dotenv import load_dotenv
 from PIL import Image
 import pytesseract
 from io import BytesIO
+from datetime import datetime
 
-load_dotenv()
+# 環境変数
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# 初期設定
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
+DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+
+# Flask アプリ
 app = Flask(__name__)
-line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
-handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
-user_id = os.environ.get("LINE_USER_ID")  # LINE Push用
-openai.api_key = os.environ["OPENAI_API_KEY"]
-DROPBOX_TOKEN = os.environ["DROPBOX_ACCESS_TOKEN"]
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# GPT解析処理
-def analyze_text_with_gpt(text):
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": text}],
-            max_tokens=800
-        )
-        return response.choices[0].message["content"].strip()
-    except Exception as e:
-        return f"[GPT解析エラー] {str(e)}"
+# Dropbox アクセストークン取得（リフレッシュトークン方式）
+def get_dropbox_access_token():
+    url = "https://api.dropbox.com/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_CLIENT_ID,
+        "client_secret": DROPBOX_CLIENT_SECRET,
+    }
+    response = requests.post(url, data=data)
+    response.raise_for_status()
+    return response.json()["access_token"]
 
-# Dropboxへアップロード
-def upload_to_dropbox(filename, content):
-    path = f"{DROPBOX_FOLDER}/{filename}"
-    dbx.files_upload(content, path, mode=WriteMode("overwrite"))
+# Dropbox クライアント生成
+def get_dropbox_client():
+    token = get_dropbox_access_token()
+    return dropbox.Dropbox(token)
 
-# 重複ファイルの検出
-def is_duplicate(content_bytes):
-    current_hash = hashlib.sha256(content_bytes).hexdigest()
-    try:
-        files = dbx.files_list_folder(DROPBOX_FOLDER).entries
-        for f in files:
-            _, ext = os.path.splitext(f.name)
-            if ext.lower() in [".txt", ".jpeg", ".jpg", ".png"]:
-                md = dbx.files_download(f.path_lower)[1].content
-                if hashlib.sha256(md).hexdigest() == current_hash:
-                    return True
-    except Exception as e:
-        print(f"[重複確認エラー] {e}")
-    return False
+# ファイルのSHA256ハッシュ生成（重複判定用）
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+# Dropboxの画像ファイル一覧取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
+
+# Dropboxから画像をダウンロード
+def download_file(path):
+    dbx = get_dropbox_client()
+    _, res = dbx.files_download(path)
+    return res.content
+
+# 重複ファイル削除（内容が同一なら削除）
+def delete_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    files = list_files(folder_path)
+    hash_map = {}
+
+    for file in files:
+        if isinstance(file, dropbox.files.FileMetadata):
+            content = download_file(file.path_display)
+            h = file_hash(content)
+
+            if h in hash_map:
+                dbx.files_delete_v2(file.path_display)
+                print(f"✅ 重複削除: {file.name}")
+            else:
+                hash_map[h] = file.path_display
 
 # OCR処理
-def extract_text_from_image(img_bytes):
+def extract_text_from_image(image_bytes):
+    image = Image.open(BytesIO(image_bytes))
+    text = pytesseract.image_to_string(image, lang="jpn+eng")
+    return text.strip()
+
+# LINE通知送信
+def send_line_message(text):
     try:
-        image = Image.open(BytesIO(img_bytes))
-        text = pytesseract.image_to_string(image, lang="jpn+eng")
-        return text
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
     except Exception as e:
-        return f"[OCRエラー] {str(e)}"
+        print(f"❌ LINE通知失敗: {e}")
 
-# LINE webhook
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    signature = request.headers.get("X-Line-Signature")
-    if signature is None:
-        return "NO SIGNATURE", 400
-
+# Webhook ルート
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("❌ Signatureエラー（署名不一致）")
         abort(400)
     return "OK"
 
-# LINEイベントハンドラ
-@handler.add(MessageEvent, message=TextMessage)
-def handle_text(event):
-    text = event.message.text
-    content = text.encode("utf-8")
-    if is_duplicate(content):
-        return
-    upload_to_dropbox("text_" + event.timestamp.strftime("%Y%m%d%H%M%S") + ".txt", content)
-    analysis = analyze_text_with_gpt(text)
-    line_bot_api.push_message(user_id, TextSendMessage(text=analysis))
+# メッセージイベント
+@handler.add(MessageEvent)
+def handle_message(event):
+    if event.message.type == "image":
+        # 画像取得
+        message_id = event.message.id
+        content = line_bot_api.get_message_content(message_id)
+        image_bytes = b''.join(chunk for chunk in content.iter_content())
 
-@handler.add(MessageEvent, message=ImageMessage)
-def handle_image(event):
-    message_content = line_bot_api.get_message_content(event.message.id)
-    img_bytes = b"".join(chunk for chunk in message_content.iter_content())
-    if is_duplicate(img_bytes):
-        return
-    upload_to_dropbox("image_" + event.timestamp.strftime("%Y%m%d%H%M%S") + ".jpg", img_bytes)
-    ocr_text = extract_text_from_image(img_bytes)
-    analysis = analyze_text_with_gpt(ocr_text)
-    line_bot_api.push_message(user_id, TextSendMessage(text=analysis))
+        # Dropboxへ保存
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        dbx_path = f"/Apps/slot-data-analyzer/{filename}"
+        dbx = get_dropbox_client()
+        dbx.files_upload(image_bytes, dbx_path, mode=WriteMode("add"))
 
-# Render用ポート設定
+        # OCR解析
+        extracted_text = extract_text_from_image(image_bytes)
+        result = extracted_text if extracted_text else "画像から文字が読み取れませんでした。"
+
+        # LINE通知
+        send_line_message(f"🧠 画像解析結果:\n{result}")
+
+        # 重複削除
+        delete_duplicates("/Apps/slot-data-analyzer")
+
+    else:
+        send_line_message("📸 画像のみ対応しています。")
+
+    return "OK"
+
+# 起動用（Render向け）
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
