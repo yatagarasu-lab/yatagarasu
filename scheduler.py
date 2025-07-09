@@ -1,55 +1,26 @@
-import time
 import threading
-from dropbox_handler import list_and_filter_files, download_file, file_hash
-from dropbox_handler import upload_file, save_to_dropbox, is_image, is_text
-from gpt_handler import process_file_with_gpt
-from line_notify import push_message
-import os
+import time
+from datetime import datetime
+from pytz import timezone
+from analyze_file import analyze_dropbox_files
 
-# ロックを使って排他制御
-lock = threading.Lock()
+def is_nighttime():
+    jst = timezone("Asia/Tokyo")
+    now = datetime.now(jst)
+    return now.hour >= 22 or now.hour < 6
 
-def analyze_and_notify(file_path, file_type, filename):
-    content = download_file(file_path)
-    result = process_file_with_gpt(content, file_type)
+def analyze_if_night():
+    if is_nighttime():
+        print("[🔍] 夜間時間帯。Dropbox解析を実行中...")
+        analyze_dropbox_files()
+    else:
+        print("[🌞] 日中時間帯のため解析をスキップ中...")
 
-    message = f"📢 解析完了\nファイル名: {filename}\nタイプ: {file_type}\n\n📄 要約:\n{result}"
-    push_message(message)
+def start_scheduled_tasks():
+    def loop():
+        while True:
+            analyze_if_night()
+            time.sleep(15 * 60)  # 15分ごとにチェック
 
-def monitor_dropbox():
-    print("🔁 Dropboxフォルダの監視を開始します...")
-    checked_hashes = set()
-
-    while True:
-        try:
-            with lock:
-                files = list_and_filter_files()
-                for file in files:
-                    path = file.path_display
-                    filename = os.path.basename(path)
-                    content = download_file(path)
-                    hash_val = file_hash(content)
-
-                    if hash_val in checked_hashes:
-                        continue  # 重複解析を防ぐ
-
-                    checked_hashes.add(hash_val)
-                                        # ファイルタイプの判定
-                    if is_image(filename):
-                        file_type = "image"
-                    elif is_text(filename):
-                        file_type = "text"
-                    else:
-                        print(f"❌ 対応外のファイル形式: {filename}")
-                        continue
-
-                    print(f"🧠 新しいファイルを解析中: {filename}")
-                    analyze_and_notify(path, file_type, filename)
-
-        except Exception as e:
-            print(f"⚠️ エラーが発生しました: {e}")
-
-        time.sleep(60)  # 60秒ごとに監視
-                    if __name__ == "__main__":
-    print("🕒 定時監視BOT 起動中（1分ごとにDropboxを監視）")
-    monitor_dropbox()
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
