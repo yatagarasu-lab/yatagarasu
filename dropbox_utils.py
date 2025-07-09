@@ -1,66 +1,26 @@
-import os
 import dropbox
-import requests
-import json
-import hashlib
+import os
+from datetime import datetime
 
-# 環境変数から取得
-APP_KEY = os.getenv("DROPBOX_APP_KEY")
-APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# アクセストークンをリフレッシュする関数
-def get_access_token():
-    url = "https://api.dropbox.com/oauth2/token"
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": REFRESH_TOKEN,
-        "client_id": APP_KEY,
-        "client_secret": APP_SECRET
-    }
-    response = requests.post(url, headers=headers, data=data)
-    if response.status_code == 200:
-        return response.json()["access_token"]
-    else:
-        raise Exception(f"アクセストークン取得失敗: {response.text}")
+def move_file_to_month_folder(path):
+    """
+    指定ファイルを /Apps/slot-data-analyzer/YYYY-MM/ に移動
+    """
+    now = datetime.now()
+    month_folder = f"/Apps/slot-data-analyzer/{now.strftime('%Y-%m')}"
+    filename = path.split("/")[-1]
+    new_path = f"{month_folder}/{filename}"
 
-# Dropboxインスタンス作成
-def get_dbx():
-    access_token = get_access_token()
-    return dropbox.Dropbox(access_token)
+    # フォルダがない場合は作成（存在済みなら無視）
+    try:
+        dbx.files_create_folder_v2(month_folder)
+    except dropbox.exceptions.ApiError as e:
+        if not (isinstance(e.error, dropbox.files.CreateFolderError) and e.error.get_path().is_conflict()):
+            raise
 
-# ファイル一覧を取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    dbx = get_dbx()
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
-
-# ファイルのダウンロード
-def download_file(path):
-    dbx = get_dbx()
-    _, res = dbx.files_download(path)
-    return res.content
-
-# ファイルのSHA256ハッシュ値を取得
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-# 重複ファイルをチェック（同一ハッシュ）
-def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    hash_map = {}
-
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            print(f"🔁 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            # dbx = get_dbx()
-            # dbx.files_delete_v2(path)  # 削除したい場合はこちらを有効化
-        else:
-            hash_map[hash_value] = path
+    # ファイルを移動
+    dbx.files_move_v2(from_path=path, to_path=new_path, allow_shared_folder=True, autorename=True)
+    return new_path
