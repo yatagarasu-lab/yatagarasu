@@ -9,3 +9,4 @@ dropbox
 requests
 tenacity
 pytz
+numpy
