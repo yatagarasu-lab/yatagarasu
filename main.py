@@ -5,7 +5,7 @@ import requests
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import TextSendMessage
+from linebot.models import TextSendMessage, MessageEvent
 import dropbox
 from dropbox.files import WriteMode
 from PIL import Image
@@ -119,12 +119,13 @@ def handle_message(event):
         dbx = get_dropbox_client()
         dbx.files_upload(image_bytes, dbx_path, mode=WriteMode("add"))
 
-        # OCR解析
-        extracted_text = extract_text_from_image(image_bytes)
-        result = extracted_text if extracted_text else "画像から文字が読み取れませんでした。"
+        # OCR解析（Render未対応のため無効化）
+        # extracted_text = extract_text_from_image(image_bytes)
+        # result = extracted_text if extracted_text else "画像から文字が読み取れませんでした。"
+        result = "🧠 画像を受信しました（OCR処理は未対応です）"
 
         # LINE通知
-        send_line_message(f"🧠 画像解析結果:\n{result}")
+        send_line_message(result)
 
         # 重複削除
         delete_duplicates("/Apps/slot-data-analyzer")
@@ -136,4 +137,5 @@ def handle_message(event):
 
 # 起動用（Render向け）
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
