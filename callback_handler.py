@@ -1,57 +1,39 @@
+from flask import Blueprint, request, jsonify
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
-from linebot.models import MessageEvent, TextMessage, ImageMessage
-from utils import reply_text_message, reply_image_message
-import dropbox
-from datetime import datetime
+from dotenv import load_dotenv
+from log_utils import delete_old_logs
 
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-DROPBOX_LOG_FOLDER = "/logs"
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+load_dotenv()
 
-def handle_text_event(event: MessageEvent):
-    user_id = event.source.user_id
-    user_text = event.message.text
+# LINE Bot の設定
+line_bot_api = LineBotApi(os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
+handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 
-    # ChatGPT応答
-    reply_text = reply_text_message(user_text)
+# Blueprint 作成
+webhook_bp = Blueprint("webhook", __name__)
 
-    # LINEへ返信
-    reply_image_message(event.reply_token, reply_text)
+@webhook_bp.route("/webhook", methods=["POST"])
+def callback():
+    # ▼ 古いログの自動削除（安全）
+    delete_old_logs(keep_days=7)
 
-    # Dropboxログ保存
-    log_message_to_dropbox(user_id, user_text, reply_text)
-
-
-def handle_image_event(event: MessageEvent):
-    user_id = event.source.user_id
-    reply_text = "画像を受け取りました（解析準備中）"
-    reply_image_message(event.reply_token, reply_text)
-
-    # ログにも画像受付情報を記録
-    log_message_to_dropbox(user_id, "[画像]", reply_text)
-
-
-def log_message_to_dropbox(user_id, user_text, reply_text):
-    """
-    受信メッセージと応答内容をDropboxにログとして保存（1日1ファイル）
-    """
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    log_path = f"{DROPBOX_LOG_FOLDER}/{date_str}"
-    filename = f"{user_id}.log"
-    full_path = f"{log_path}/{filename}"
-
-    log_entry = f"[{datetime.now().strftime('%H:%M:%S')}]\nUSER: {user_text}\nGPT : {reply_text}\n\n"
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
 
     try:
-        # 既存ファイルがあるかチェック
-        try:
-            _, res = dbx.files_download(full_path)
-            existing = res.content.decode("utf-8")
-        except dropbox.exceptions.ApiError:
-            existing = ""
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        return "Invalid signature", 400
 
-        updated_log = existing + log_entry
-        dbx.files_upload(updated_log.encode("utf-8"), full_path, mode=dropbox.files.WriteMode.overwrite)
-        print("✅ ログ記録成功")
-    except Exception as e:
-        print(f"❌ ログ記録失敗: {e}")
+    return "OK", 200
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_text = event.message.text
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="ありがとうございます")
+    )
