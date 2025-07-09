@@ -2,9 +2,9 @@
 # 基本機能
 # =====================
 Flask==2.3.3
-gunicorn==20.1.0
+gunicorn==21.2.0  # 最新安定版（20.1.0 → 21.2.0 に更新推奨）
 line-bot-sdk==3.8.0
-openai==1.31.1
+openai==1.33.0  # 最新安定版（1.31.1 → 1.33.0）
 python-dotenv==1.0.1
 requests==2.31.0
 pytz==2024.1
@@ -29,8 +29,8 @@ torchvision==0.18.0
 opencv-python-headless==4.9.0.80
 
 # =====================
-# 将来的に使うかもしれない機能（導入済でも軽い）
+# 将来の拡張（軽量 or 無効化可能）
 # =====================
-python-magic==0.4.27  # ファイルタイプ判定
-moviepy==1.0.3        # 動画解析（Renderでは推奨外）
-google-api-python-client==2.125.0  # Google Sheets 用（必要になったら認証付きで使う）
+python-magic==0.4.27              # ファイルタイプ判定
+moviepy==1.0.3                    # 動画解析（Render本番では非推奨）
+google-api-python-client==2.125.0  # Google Sheets API対応（認証別途）
