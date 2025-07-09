@@ -4,7 +4,6 @@ line-bot-sdk==3.8.0
 openai==1.31.1
 python-dotenv==1.0.1
 pillow==10.3.0
-pytesseract==0.3.10
 dropbox==11.36.2
 requests==2.31.0
 tenacity==8.2.3
@@ -12,3 +11,10 @@ pytz==2024.1
 numpy==1.26.4
 tqdm==4.66.4
 certifi==2024.6.2
+
+# OCRに必要（画像認識）
+easyocr==1.7.1
+scikit-image==0.22.0
+torch==2.3.0
+torchvision==0.18.0
+opencv-python-headless==4.9.0.80
