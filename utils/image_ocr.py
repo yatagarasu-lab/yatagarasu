@@ -1,24 +1,22 @@
 # utils/image_ocr.py
 
 import easyocr
-import numpy as np
 from PIL import Image
+import numpy as np
 import io
 
-# OCRリーダーの初期化（日本語と英語を対象に）
-reader = easyocr.Reader(['ja', 'en'], gpu=False)
+reader = easyocr.Reader(["ja", "en"], gpu=False)  # 日本語・英語両対応
 
-def extract_text_from_image(image_bytes: bytes) -> str:
+def extract_text_from_image_bytes(image_bytes):
     """
-    画像のバイナリデータから文字を抽出する
-    :param image_bytes: 画像データ（バイナリ）
-    :return: 抽出された文字列
+    画像バイトデータからテキストを抽出
+    :param image_bytes: Dropboxから取得した画像のバイナリ
+    :return: 認識されたテキスト（文字列）
     """
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        image_np = np.array(image)
-        results = reader.readtext(image_np, detail=0)
-        text = "\n".join(results)
-        return text.strip()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img_np = np.array(img)
+        results = reader.readtext(img_np, detail=0)
+        return "\n".join(results)
     except Exception as e:
-        return f"[OCR解析エラー]: {str(e)}"
+        return f"[OCRエラー] {str(e)}"
