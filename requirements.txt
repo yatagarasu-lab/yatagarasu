@@ -2,15 +2,15 @@
 # 基本機能
 # =====================
 Flask==2.3.3
-gunicorn==21.2.0  # 最新安定版（20.1.0 → 21.2.0 に更新推奨）
+gunicorn==21.2.0  # Render本番用 WSGIサーバー
 line-bot-sdk==3.8.0
-openai==1.33.0  # 最新安定版（1.31.1 → 1.33.0）
+openai==1.33.0  # GPT連携
 python-dotenv==1.0.1
 requests==2.31.0
 pytz==2024.1
 certifi==2024.6.2
 tqdm==4.66.4
-tenacity==8.2.3
+tenacity==8.2.3  # 再試行制御（OpenAI安定化用）
 
 # =====================
 # ファイル処理・画像処理
@@ -21,16 +21,17 @@ dropbox==11.36.2
 
 # =====================
 # OCR（画像文字認識）
+# ※画像文字解析機能を使う場合のみ必要
 # =====================
 easyocr==1.7.1
 scikit-image==0.22.0
 torch==2.3.0
 torchvision==0.18.0
-opencv-python-headless==4.9.0.80
+opencv-python-headless==4.9.0.80  # GUI不要な環境向け
 
 # =====================
-# 将来の拡張（軽量 or 無効化可能）
+# 拡張モジュール（任意で軽量化可）
 # =====================
-python-magic==0.4.27              # ファイルタイプ判定
-moviepy==1.0.3                    # 動画解析（Render本番では非推奨）
-google-api-python-client==2.125.0  # Google Sheets API対応（認証別途）
+python-magic==0.4.27              # ファイルタイプ判定（任意）
+moviepy==1.0.3                    # 動画処理（容量重、Renderでは非推奨）
+google-api-python-client==2.125.0  # Google Sheets連携（拡張用）
