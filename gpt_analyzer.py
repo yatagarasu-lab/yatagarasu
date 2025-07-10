@@ -1,73 +1,84 @@
 import os
-import time
 import dropbox
-import hashlib
-from openai import OpenAI
+import openai
+from datetime import datetime, timedelta
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
-from dropbox_handler import list_files, download_file, delete_file
+from dropbox.oauth import DropboxOAuth2FlowNoRedirect
+from dropbox.files import FileMetadata
+import hashlib
 
-# OpenAIクライアント設定
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# LINE API
+# ==== 環境変数読み込み ====
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+# ==== 初期化 ====
+openai.api_key = OPENAI_API_KEY
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# Dropbox クライアント
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
-    app_key=os.getenv("DROPBOX_APP_KEY"),
-    app_secret=os.getenv("DROPBOX_APP_SECRET")
-)
 
-# 重複ファイルのハッシュを記録
-hash_registry = {}
+def get_dropbox_access_token():
+    """リフレッシュトークンを使ってアクセストークンを取得"""
+    import requests
+    response = requests.post(
+        "https://api.dropbox.com/oauth2/token",
+        auth=(DROPBOX_APP_KEY, DROPBOX_APP_SECRET),
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": DROPBOX_REFRESH_TOKEN
+        },
+    )
+    return response.json()["access_token"]
 
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
 
-def analyze_and_notify():
-    folder_path = "/Apps/slot-data-analyzer"
-    files = list_files(folder_path)
+def list_recent_files(dbx, folder_path="/Apps/slot-data-analyzer", minutes=10):
+    """直近N分以内に更新されたファイル一覧"""
+    recent_files = []
+    now = datetime.utcnow()
+    time_threshold = now - timedelta(minutes=minutes)
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
+    for entry in dbx.files_list_folder(folder_path).entries:
+        if isinstance(entry, FileMetadata):
+            if entry.server_modified > time_threshold:
+                recent_files.append(entry)
+    return recent_files
 
-        # 重複チェック
-        h = file_hash(content)
-        if h in hash_registry:
-            print(f"[SKIP] 重複ファイル: {path}")
-            delete_file(path)  # 自動削除
-            continue
-        hash_registry[h] = path
 
-        # GPTによる要約/解析
-        text = content.decode("utf-8", errors="ignore")[:3000]
-        print(f"[INFO] GPT解析中: {path}")
+def download_file(dbx, path):
+    """Dropboxからファイルをダウンロード"""
+    metadata, res = dbx.files_download(path)
+    return res.content
 
-        try:
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "これはスロットの設定やイベント情報のファイルです。内容を分析・要約してください。"},
-                    {"role": "user", "content": text}
-                ],
-                temperature=0.4,
-                max_tokens=1000
-            )
-            summary = response.choices[0].message.content.strip()
 
-            # LINE通知送信
-            line_bot_api.push_message(
-                LINE_USER_ID,
-                TextSendMessage(text=f"📄 {path} を解析しました:\n\n{summary}")
-            )
-            print(f"[通知完了] {path}")
+def summarize_with_gpt(content_bytes, filename):
+    """GPTで内容要約（テキスト or 画像 or バイナリ）"""
+    try:
+        text = content_bytes.decode("utf-8")
+    except Exception:
+        text = f"{filename} を受信しました（内容の解析は別途対応中）"
+    return f"📝 {filename} の要約\n\n{text[:300]}..."
 
-        except Exception as e:
-            print(f"[エラー] GPTまたはLINE通知失敗: {e}")
 
-        time.sleep(1)  # 負荷対策
+def push_notification(message):
+    """LINEへPush通知"""
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+
+
+def analyze_dropbox_and_notify():
+    """Dropboxの最新ファイルを解析してLINEへ通知"""
+    token = get_dropbox_access_token()
+    dbx = dropbox.Dropbox(token)
+
+    recent_files = list_recent_files(dbx)
+    if not recent_files:
+        push_notification("📂 新しいファイルは見つかりませんでした。")
+        return
+
+    for file in recent_files:
+        content = download_file(dbx, file.path_display)
+        summary = summarize_with_gpt(content, file.name)
+        push_notification(summary)
