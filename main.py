@@ -1,79 +1,90 @@
 import os
 import json
 import hashlib
-from flask import Flask, request, abort
 import dropbox
-from openai import OpenAI
-from linebot import LineBotApi
-from linebot.models import PushMessage, TextSendMessage
+from flask import Flask, request
+from datetime import datetime
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import TextSendMessage
 
-# 環境変数の取得
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
-DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
+# 環境変数からトークンを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")  # 固定返信先
 
-# インスタンス生成
-app = Flask(__name__)
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+# 各種インスタンス
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
+app = Flask(__name__)
+
+# ファイルの重複チェック用ハッシュ
+def file_hash(content):
+    return hashlib.md5(content).hexdigest()
+
+# Dropboxのフォルダからファイル一覧を取得
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    return dbx.files_list_folder(folder_path).entries
+
+# Dropboxからファイルをダウンロード
 def download_file(path):
     _, res = dbx.files_download(path)
-    return res.content.decode("utf-8", errors="ignore")
+    return res.content
 
-def list_files(folder_path):
-    res = dbx.files_list_folder(folder_path)
-    return res.entries
+# GPTログをDropboxに保存
+def save_gpt_log(user_id, prediction, result, category="slot"):
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id,
+        "category": category,
+        "prediction": prediction,
+        "result": result
+    }
+    filename = f"/gpt_logs/{category}_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    content = json.dumps(log_entry, ensure_ascii=False, indent=2)
+    dbx.files_upload(content.encode(), filename, mode=dropbox.files.WriteMode("add"))
 
-def analyze_content(content):
-    prompt = f"""
-次のファイルの内容を要約し、スロット設定・機種傾向・注目ポイントがあれば指摘してください：
+# ファイルの重複をチェック・削除
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
+    files = list_files(folder_path)
+    hash_map = {}
+    for file in files:
+        path = file.path_display
+        content = download_file(path)
+        hash_value = file_hash(content)
+        if hash_value in hash_map:
+            dbx.files_delete_v2(path)
+        else:
+            hash_map[hash_value] = path
 
---- 内容ここから ---
-{content}
---- 内容ここまで ---
+# Webhookのエンドポイント
+@app.route("/callback", methods=['POST'])
+def callback():
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, request.headers['X-Line-Signature'])
+    except Exception as e:
+        print(f"Error: {e}")
+    return 'OK'
 
-要点だけを簡潔にまとめてください。
-"""
-    completion = openai_client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return completion.choices[0].message.content.strip()
+# ユーザーからのメッセージ処理
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    text = event.message.text.strip()
+    
+    # GPT記録コマンド例: 「予想 保存」
+    if text.startswith("予想"):
+        prediction = "北斗102番台 / グール121番台"
+        result = "北斗 +3200枚 / グール -150枚"
+        save_gpt_log(event.source.user_id, prediction, result)
+        reply = "予想と結果を記録しました。"
+    else:
+        reply = "ありがとうございます"
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    if not request.headers.get("X-Dropbox-Signature"):
-        abort(400)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-    data = json.loads(request.data.decode("utf-8"))
-    for path in data.get("list_folder", {}).get("accounts", []):
-        try:
-            files = list_files(DROPBOX_FOLDER_PATH)
-            if not files:
-                continue
-            latest_file = sorted(files, key=lambda f: f.server_modified)[-1]
-            file_path = latest_file.path_display
-            content = download_file(file_path)
-            analysis = analyze_content(content)
-
-            # LINE通知
-            line_bot_api.push_message(
-                LINE_USER_ID,
-                TextSendMessage(text=f"📊解析結果:\n{analysis}")
-            )
-
-            # Dropboxに結果を保存
-            result_path = file_path.replace(".txt", "_解析結果.txt")
-            dbx.files_upload(analysis.encode("utf-8"), result_path, mode=dropbox.files.WriteMode("overwrite"))
-
-        except Exception as e:
-            print("エラー:", e)
-
-    return "OK", 200
-
+# 起動コマンド
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run()
