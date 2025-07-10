@@ -1,92 +1,96 @@
 import os
-import dropbox
-import hashlib
 import io
-import easyocr
-import openai
+from dropbox_utils import list_files, download_file, file_hash, delete_file
 from PIL import Image
-from dropbox.files import FileMetadata
-from line_notify import send_line_message
+import pytz
+from datetime import datetime
+from openai import OpenAI
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+import mimetypes
+import hashlib
 
 # 環境変数
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", 2048))
 
-# 初期設定
-openai.api_key = OPENAI_API_KEY
+# インスタンス
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# EasyOCR初期化（日本語+英語）
-ocr_reader = easyocr.Reader(["ja", "en"], gpu=False)
-
-def get_dropbox_access_token():
-    import requests
-    url = "https://api.dropbox.com/oauth2/token"
-    data = {
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "grant_type": "refresh_token",
-        "client_id": DROPBOX_APP_KEY,
-        "client_secret": DROPBOX_APP_SECRET
-    }
-    response = requests.post(url, data=data)
-    return response.json().get("access_token")
-
-def connect_dropbox():
-    token = get_dropbox_access_token()
-    return dropbox.Dropbox(oauth2_access_token=token)
-
-def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+# ファイル重複判定用ハッシュ記録
+hash_map = {}
 
 def analyze_dropbox_and_notify():
-    dbx = connect_dropbox()
-    folder_path = "/Apps/slot-data-analyzer"
-    files = dbx.files_list_folder(folder_path).entries
+    """Dropbox内のファイルを解析してLINEに通知"""
+    entries = list_files()
+    results = []
+    for entry in entries:
+        path = entry.path_display
+        content = download_file(path)
+        h = file_hash(content)
 
-    hash_map = {}
-    for file in sorted(files, key=lambda x: x.server_modified, reverse=True):
-        if not isinstance(file, FileMetadata):
+        if h in hash_map:
+            delete_file(path)  # 重複ファイル削除
             continue
-
-        path = file.path_display
-        _, ext = os.path.splitext(path.lower())
-        content = dbx.files_download(path)[1].content
-
-        hash_value = file_hash(content)
-        if hash_value in hash_map:
-            continue
-        hash_map[hash_value] = path
-
-        # 画像 or テキストの処理
-        if ext in [".jpg", ".jpeg", ".png"]:
-            text = ocr_image(content)
-        elif ext in [".txt"]:
-            text = content.decode("utf-8")
         else:
-            continue
+            hash_map[h] = path
 
-        summary = summarize_with_gpt(text)
-        send_line_message(summary)
+        result = analyze_content(path, content)
+        results.append(result)
 
-def ocr_image(content):
+    summary = "\n\n".join(results) if results else "新しい解析対象がありませんでした。"
+    line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=summary))
+
+
+def analyze_content(path, content):
+    """ファイル内容をGPTで解析（画像 or テキスト）"""
+    mime_type, _ = mimetypes.guess_type(path)
+
+    if mime_type and mime_type.startswith("image/"):
+        return analyze_image(path, content)
+    else:
+        return analyze_text(path, content)
+
+
+def analyze_text(path, content):
+    """テキストファイルをGPTで要約"""
     try:
-        image = Image.open(io.BytesIO(content)).convert("RGB")
-        result = ocr_reader.readtext(np.array(image), detail=0)
-        return "\n".join(result)
-    except Exception as e:
-        return f"OCRエラー: {e}"
+        text = content.decode("utf-8")
+    except:
+        return f"[{path}] テキスト解析失敗（文字コード不明）"
 
-def summarize_with_gpt(text):
+    prompt = f"次の内容を要約してください：\n\n{text}"
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=MAX_TOKENS,
+    )
+    summary = response.choices[0].message.content.strip()
+    return f"[{path}]\n{summary}"
+
+
+def analyze_image(path, content):
+    """画像ファイルをOCR＋要約"""
     try:
-        prompt = f"以下の情報を要約してください：\n{text[:2000]}"
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
-            temperature=0.5,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"要約エラー: {e}"
+        image = Image.open(io.BytesIO(content))
+        import easyocr
+        reader = easyocr.Reader(["ja", "en"], gpu=False)
+        result = reader.readtext(content, detail=0)
+        text = "\n".join(result)
+    except:
+        return f"[{path}] 画像解析失敗（読み込みエラー）"
+
+    if not text.strip():
+        return f"[{path}] 画像内に文字が見つかりませんでした。"
+
+    prompt = f"次の画像内のテキストを要約してください：\n\n{text}"
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=MAX_TOKENS,
+    )
+    summary = response.choices[0].message.content.strip()
+    return f"[{path}]\n{summary}"
