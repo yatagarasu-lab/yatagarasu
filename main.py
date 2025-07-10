@@ -1,42 +1,54 @@
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
-import dropbox
-from dotenv import load_dotenv
-from linebot import LineBotApi
-from utils import download_and_analyze_files
-from predictor import run_prediction_cycle
+from gpt_analyzer import analyze_dropbox_and_notify
 
-load_dotenv()
+app = Flask(__name__)
 
-# 環境変数の読み込み
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_ACCESS_TYPE = "refresh_token"
-
+# 環境変数から取得
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-
-# Dropbox接続（リフレッシュトークン方式）
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-    app_key=DROPBOX_APP_KEY,
-    app_secret=DROPBOX_APP_SECRET
-)
+LINE_USER_ID = os.getenv("LINE_USER_ID")  # Push送信用
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def process_dropbox_change():
-    """Dropbox上のファイル更新を検出して処理"""
-    result = download_and_analyze_files(dbx)
 
-    if result:
-        line_bot_api.push_message(LINE_USER_ID, result)
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
 
-def daily_cycle():
-    """毎日の予測→答え合わせ→学習→通知の流れ"""
-    result = run_prediction_cycle()
-    if result:
-        line_bot_api.push_message(LINE_USER_ID, result)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return "OK"
+
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    """LINEで受け取ったテキストに対して、Dropbox解析＋通知を行う"""
+    user_text = event.message.text.lower()
+    if "解析" in user_text or "分析" in user_text:
+        analyze_dropbox_and_notify()
+        reply = "Dropbox内の最新データを解析しました。"
+    else:
+        reply = "ありがとうございます"
+
+    line_bot_api.reply_message(
+        event.reply_token, TextSendMessage(text=reply)
+    )
+
+
+@app.route("/", methods=["GET"])
+def health_check():
+    return "OK"
+
 
 if __name__ == "__main__":
-    print("メイン処理が直接起動されました。")
+    app.run(host="0.0.0.0", port=10000)
