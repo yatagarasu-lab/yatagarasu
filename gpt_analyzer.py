@@ -1,106 +1,115 @@
-# gpt_analyzer.py
-
 import os
 import dropbox
-from dropbox.files import FileMetadata
-from openai import OpenAI
+from PIL import Image
+from io import BytesIO
+import pytz
+import datetime
+import openai
+import easyocr
+import numpy as np
+
 from utils.line_notify import send_line_message
-from utils.file_utils import (
-    list_files,
-    download_file,
-    file_hash,
-    detect_file_type
-)
-from utils.image_ocr import extract_text_from_image_bytes
-from dotenv import load_dotenv
+from utils.file_utils import list_files, download_file, file_hash, is_duplicate
 
-load_dotenv()
-
-# Dropbox認証情報（リフレッシュトークン方式）
+# Dropbox アクセス
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", 4096))
+# OpenAI キー
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# LINE通知用ユーザーID
+# LINE 通知先
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# GPT初期化
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# 初期化
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET,
+)
 
-def get_dropbox_client():
-    """リフレッシュトークンからDropboxクライアントを生成"""
-    oauth_result = dropbox.DropboxOAuth2FlowNoRedirect(
-        consumer_key=DROPBOX_APP_KEY,
-        consumer_secret=DROPBOX_APP_SECRET,
-        token_access_type="offline"
-    )
-    dbx = dropbox.Dropbox(
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET
-    )
-    return dbx
 
-def analyze_file(path, content, file_type):
-    """ファイルの種類に応じて解析"""
-    if file_type == "text":
-        return analyze_text_content(path, content)
-    elif file_type == "image":
-        text = extract_text_from_image_bytes(content)
-        return analyze_text_content(path + "（画像OCR）", text)
-    else:
-        return f"{path}: 対応していないファイル形式（{file_type}）"
-
-def analyze_text_content(path, text):
-    """テキストデータをGPTで要約解析"""
-    if not text.strip():
-        return f"{path}: 空のファイルでした。"
-
+def summarize_text(text):
     try:
-        response = openai_client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "以下のテキストを要約してください。重要なキーワードや内容も抽出してください。"},
-                {"role": "user", "content": text[:MAX_TOKENS]}
-            ]
+                {"role": "system", "content": "以下のテキストを要約してください"},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=1024,
+            temperature=0.2
         )
-        summary = response.choices[0].message.content
-        return f"【{path} の解析結果】\n{summary}"
+        return response["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"{path} の解析中にエラー: {e}"
+        return f"[要約エラー]: {str(e)}"
+
+
+def extract_text_from_image(image_bytes):
+    try:
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        reader = easyocr.Reader(['ja', 'en'], gpu=False)
+        result = reader.readtext(np.array(image), detail=0)
+        return "\n".join(result)
+    except Exception as e:
+        return f"[画像解析エラー]: {str(e)}"
+
+
+def analyze_file(path):
+    try:
+        content = download_file(path)
+        ext = os.path.splitext(path)[1].lower()
+
+        if ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]:
+            extracted_text = extract_text_from_image(content)
+            summary = summarize_text(extracted_text)
+            return f"📸 {os.path.basename(path)}\n{summary}"
+
+        elif ext in [".txt", ".csv", ".log"]:
+            text = content.decode("utf-8", errors="ignore")
+            summary = summarize_text(text)
+            return f"📄 {os.path.basename(path)}\n{summary}"
+
+        else:
+            return f"❓未対応ファイル: {os.path.basename(path)}"
+
+    except Exception as e:
+        return f"[解析エラー]: {os.path.basename(path)} - {str(e)}"
+
 
 def analyze_dropbox_and_notify():
-    """Dropboxフォルダ内のファイルを解析し、LINEに通知"""
-    dbx = get_dropbox_client()
-    folder_path = "/Apps/slot-data-analyzer"
+    try:
+        files = list_files("/Apps/slot-data-analyzer")
+        if not files:
+            send_line_message(LINE_USER_ID, "Dropboxにファイルがありませんでした。")
+            return
 
-    files = list_files(folder_path)
-    if not files:
-        send_line_message("Dropboxに解析対象のファイルがありません。", LINE_USER_ID)
-        return
+        summaries = []
+        seen_hashes = set()
 
-    results = []
-    seen_hashes = set()
-
-    for file in files:
-        if isinstance(file, FileMetadata):
+        for file in sorted(files, key=lambda f: f.server_modified, reverse=True):
             path = file.path_display
             content = download_file(path)
-            if content is None:
+            file_hash_value = file_hash(content)
+
+            if file_hash_value in seen_hashes:
                 continue
+            seen_hashes.add(file_hash_value)
 
-            hash_val = file_hash(content)
-            if hash_val in seen_hashes:
-                continue  # 重複ファイルはスキップ
-            seen_hashes.add(hash_val)
+            summary = analyze_file(path)
+            summaries.append(summary)
 
-            file_type = detect_file_type(path, content)
-            result = analyze_file(path, content, file_type)
-            results.append(result)
+            if len(summaries) >= 3:  # 通知上限（過剰通知防止）
+                break
 
-    final_message = "\n\n".join(results) if results else "有効なファイルが見つかりませんでした。"
-    send_line_message(final_message, LINE_USER_ID)
+        if summaries:
+            now = datetime.datetime.now(pytz.timezone("Asia/Tokyo"))
+            header = f"🧠最新解析結果（{now.strftime('%Y-%m-%d %H:%M')}）"
+            result = "\n\n".join([header] + summaries)
+            send_line_message(LINE_USER_ID, result)
+        else:
+            send_line_message(LINE_USER_ID, "新しいファイルはありませんでした。")
+
+    except Exception as e:
+        send_line_message(LINE_USER_ID, f"[全体エラー]: {str(e)}")
