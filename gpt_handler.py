@@ -1,28 +1,34 @@
-# gpt_handler.py
 import openai
-import hashlib
-import json
-import time
-import re
+from utils import get_timestamp
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# ファイルの内容を判別して「スロット関連」か確認
-def is_slot_related(text):
-    slot_keywords = ["スロット", "設定", "差枚", "北斗", "番長", "ジャグラー", "グラフ", "CZ", "AT", "パチスロ", "解析"]
-    return any(keyword in text for keyword in slot_keywords)
+# GPTによる自動要約・解析（テキスト or OCR結果に対応）
+def analyze_content(file_name, content_text):
+    prompt = f"""
+以下の内容は、スロット設定情報・グラフ画像の解析ログ、またはメモです。
+内容を要約し、必要に応じて「設定推測」「イベント名」「対象機種」「台番号」などを抽出してください。
 
-# GPTで要約・スロット関連確認
-def analyze_file_with_gpt(file_name, content):
+【ファイル名】{file_name}
+【内容】\n{content_text}
+
+# 出力フォーマット（例）
+- 要約: ○○○
+- 機種: ○○○（ある場合）
+- 台番号: ○○○（ある場合）
+- 設定推測: ○○○（あれば）
+- コメント: （自由欄）
+
+日本語でわかりやすくまとめてください。
+    """.strip()
+
     try:
-        result = openai.ChatCompletion.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "あなたはスロットの専門家です。送られた情報がスロットに関する内容かを確認し、関連あれば要点を要約してください。スロットに無関係なら『これはスロットと無関係です』と返してください。"},
-                {"role": "user", "content": content[:4000]}
-            ]
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
+            temperature=0.4,
         )
-        reply = result.choices[0].message.content.strip()
-        return reply
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"[GPTエラー]: {str(e)}"
+        return f"[GPT解析エラー] {str(e)}"
