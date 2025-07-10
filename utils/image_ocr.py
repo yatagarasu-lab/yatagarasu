@@ -5,18 +5,20 @@ from PIL import Image
 import numpy as np
 import io
 
-reader = easyocr.Reader(["ja", "en"], gpu=False)  # 日本語・英語両対応
+# EasyOCR 初期化（日本語＋英語）
+reader = easyocr.Reader(['ja', 'en'], gpu=False)
 
 def extract_text_from_image_bytes(image_bytes):
     """
-    画像バイトデータからテキストを抽出
-    :param image_bytes: Dropboxから取得した画像のバイナリ
-    :return: 認識されたテキスト（文字列）
+    バイトデータから画像を読み取り、OCRでテキストを抽出する
+    :param image_bytes: 画像ファイルのバイナリデータ
+    :return: 抽出されたテキスト（文字列）
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img_np = np.array(img)
-        results = reader.readtext(img_np, detail=0)
-        return "\n".join(results)
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        image_np = np.array(image)
+
+        results = reader.readtext(image_np, detail=0)
+        return "\n".join(results).strip()
     except Exception as e:
-        return f"[OCRエラー] {str(e)}"
+        return f"OCR解析中にエラー: {e}"
