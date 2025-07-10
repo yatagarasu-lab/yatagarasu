@@ -1,56 +1,35 @@
-import hashlib
+import os
 import dropbox
-from dropbox.files import WriteMode
 
-from dropbox_token_refresher import get_dropbox_access_token
+# Dropboxクライアント（リフレッシュトークン対応）
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
+    app_key=os.getenv("DROPBOX_APP_KEY"),
+    app_secret=os.getenv("DROPBOX_APP_SECRET")
+)
 
-# Dropbox接続
-def get_dropbox_client():
-    token = get_dropbox_access_token()
-    return dropbox.Dropbox(token)
-
-# ファイル一覧取得（指定フォルダ以下）
 def list_files(folder_path="/Apps/slot-data-analyzer"):
-    dbx = get_dropbox_client()
-    result = dbx.files_list_folder(folder_path, recursive=True)
-    files = result.entries
-    while result.has_more:
-        result = dbx.files_list_folder_continue(result.cursor)
-        files.extend(result.entries)
-    return files
+    """Dropboxフォルダ内のファイル一覧を取得"""
+    try:
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except dropbox.exceptions.ApiError as e:
+        print(f"[エラー] ファイル一覧取得失敗: {e}")
+        return []
 
-# ファイルのダウンロード（バイナリ取得）
 def download_file(path):
-    dbx = get_dropbox_client()
-    metadata, res = dbx.files_download(path)
-    return res.content
+    """Dropboxからファイルをダウンロードしてバイナリを返す"""
+    try:
+        _, res = dbx.files_download(path)
+        return res.content
+    except dropbox.exceptions.HttpError as e:
+        print(f"[エラー] ファイルダウンロード失敗: {e}")
+        return b""
 
-# ファイルのアップロード
-def upload_file(file_bytes, dropbox_path):
-    dbx = get_dropbox_client()
-    dbx.files_upload(file_bytes, dropbox_path, mode=WriteMode("overwrite"))
-
-# ファイル削除
 def delete_file(path):
-    dbx = get_dropbox_client()
-    dbx.files_delete_v2(path)
-
-# 内容ハッシュ生成
-def file_hash(data):
-    return hashlib.sha256(data).hexdigest()
-
-# 重複ファイルチェック（同一内容のファイルパス一覧を返す）
-def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    hash_map = {}
-    duplicates = []
-
-    for file in list_files(folder_path):
-        if isinstance(file, dropbox.files.FileMetadata):
-            path = file.path_display
-            content = download_file(path)
-            h = file_hash(content)
-            if h in hash_map:
-                duplicates.append((path, hash_map[h]))
-            else:
-                hash_map[h] = path
-    return duplicates
+    """Dropboxの指定ファイルを削除"""
+    try:
+        dbx.files_delete_v2(path)
+        print(f"[削除] 重複ファイル削除: {path}")
+    except dropbox.exceptions.ApiError as e:
+        print(f"[削除失敗] {path}: {e}")
