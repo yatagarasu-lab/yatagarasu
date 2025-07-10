@@ -1,43 +1,78 @@
 import os
-import io
-import mimetypes
 import hashlib
-import numpy as np
+import dropbox
+from openai import OpenAI
 from PIL import Image
-import easyocr
-import filetype
+from io import BytesIO
+import mimetypes
+import base64
 
-# OCRリーダー初期化（日本語＋英語）
-ocr_reader = easyocr.Reader(['ja', 'en'], gpu=False)
+# 環境変数
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+processed_hashes = set()  # 重複判定用ハッシュ集合
 
 def file_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
-def get_extension(content: bytes) -> str:
-    kind = filetype.guess(content)
-    return kind.extension if kind else "bin"
+def is_image_file(path: str) -> bool:
+    mime, _ = mimetypes.guess_type(path)
+    return mime and mime.startswith("image")
 
-def is_image(filename: str) -> bool:
-    ext = os.path.splitext(filename)[-1].lower()
-    return ext in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
-
-def ocr_image_bytes(image_bytes: bytes) -> str:
+def analyze_file_with_gpt(filename: str, content: bytes) -> str:
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img_np = np.array(image)
-        result = ocr_reader.readtext(img_np, detail=0)
-        return "\n".join(result)
+        if is_image_file(filename):
+            img_base64 = base64.b64encode(content).decode("utf-8")
+            res = client.chat.completions.create(
+                model=GPT_MODEL,
+                messages=[
+                    {"role": "system", "content": "あなたはスロット設定判別AIです。画像やテキストから内容を要約・分析してレポートを作成してください。"},
+                    {"role": "user", "content": f"以下の画像を解析してください（Base64形式）:\n{img_base64}"}
+                ]
+            )
+        else:
+            text = content.decode("utf-8", errors="ignore")
+            res = client.chat.completions.create(
+                model=GPT_MODEL,
+                messages=[
+                    {"role": "system", "content": "あなたはスロット設定判別AIです。"},
+                    {"role": "user", "content": f"以下のテキストを解析してください:\n{text}"}
+                ]
+            )
+
+        return res.choices[0].message.content.strip()
+
     except Exception as e:
-        return f"OCR失敗: {e}"
+        return f"[エラー] 解析失敗: {str(e)}"
 
-def get_file_size_kb(content: bytes) -> float:
-    return round(len(content) / 1024, 2)
+def download_and_analyze_files(dbx):
+    folder_path = "/Apps/slot-data-analyzer"
+    result_summary = ""
 
-def safe_decode(content: bytes) -> str:
     try:
-        return content.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            return content.decode("shift_jis")
-        except:
-            return "[デコード不可] バイナリファイル"
+        files = dbx.files_list_folder(folder_path).entries
+
+        for file in files:
+            if isinstance(file, dropbox.files.FileMetadata):
+                path = file.path_display
+                _, ext = os.path.splitext(path)
+                _, res = os.path.split(path)
+
+                metadata, res = dbx.files_download(path)
+                content = res.content
+
+                h = file_hash(content)
+                if h in processed_hashes:
+                    continue
+                processed_hashes.add(h)
+
+                summary = analyze_file_with_gpt(path, content)
+                result_summary += f"\n\n📄 **{file.name}** の解析結果:\n{summary}"
+
+    except Exception as e:
+        result_summary += f"\n[エラー発生]: {str(e)}"
+
+    return result_summary if result_summary else None
