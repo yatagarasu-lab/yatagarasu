@@ -1,21 +1,23 @@
 services:
   - type: web
-    name: dropbox-line-bot
+    name: slot-data-analyzer
     env: python
-    region: singapore
-    plan: free
     buildCommand: ""
     startCommand: gunicorn main:app
+    plan: free
+    autoDeploy: true
     envVars:
       - key: LINE_CHANNEL_SECRET
-        sync: false
+        value: ${LINE_CHANNEL_SECRET}
       - key: LINE_CHANNEL_ACCESS_TOKEN
-        sync: false
-      - key: DROPBOX_APP_KEY
-        sync: false
-      - key: DROPBOX_APP_SECRET
-        sync: false
-      - key: DROPBOX_REFRESH_TOKEN
-        sync: false
+        value: ${LINE_CHANNEL_ACCESS_TOKEN}
       - key: LINE_USER_ID
-        sync: false
+        value: ${LINE_USER_ID}
+      - key: OPENAI_API_KEY
+        value: ${OPENAI_API_KEY}
+      - key: DROPBOX_APP_KEY
+        value: ${DROPBOX_APP_KEY}
+      - key: DROPBOX_APP_SECRET
+        value: ${DROPBOX_APP_SECRET}
+      - key: DROPBOX_REFRESH_TOKEN
+        value: ${DROPBOX_REFRESH_TOKEN}
