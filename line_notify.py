@@ -1,31 +1,17 @@
 import os
-import requests
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
 
+# 環境変数からLINE設定を取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")  # 宛先ユーザーID（自分自身）
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-def send_line_message(text):
-    if not LINE_CHANNEL_ACCESS_TOKEN or not USER_ID:
-        print("⚠️ LINEの環境変数が未設定です")
-        return
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-    }
-    body = {
-        "to": USER_ID,
-        "messages": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ]
-    }
-
-    response = requests.post(url, headers=headers, json=body)
-    if response.status_code != 200:
-        print(f"❌ LINE通知エラー: {response.status_code} - {response.text}")
-    else:
-        print("✅ LINE通知送信完了")
+def send_line_message(message: str):
+    try:
+        if not LINE_USER_ID:
+            raise ValueError("LINE_USER_ID が未設定です。")
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+    except Exception as e:
+        print(f"LINE通知エラー: {e}")
