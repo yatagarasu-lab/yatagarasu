@@ -1,28 +1,28 @@
-import hashlib
 import os
+import hashlib
+from datetime import datetime
+from dotenv import load_dotenv
 
-# ハッシュを保存するファイル
-HASH_STORE_FILE = "processed_hashes.txt"
+load_dotenv()
 
-def file_hash(content):
-    """ファイル内容のSHA256ハッシュを計算"""
+# SHA256ハッシュを取得（テキスト or バイナリ対応）
+def hash_content(content):
+    if isinstance(content, str):
+        content = content.encode('utf-8')
     return hashlib.sha256(content).hexdigest()
 
-def is_duplicate(content):
-    """ファイルが既に処理済みかどうかをチェック"""
-    hash_val = file_hash(content)
+# 現在時刻のタイムスタンプ（日本時間）
+def get_timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if not os.path.exists(HASH_STORE_FILE):
-        return False
+# ファイル名から拡張子を取得
+def get_file_extension(filename):
+    return os.path.splitext(filename)[1].lower()
 
-    with open(HASH_STORE_FILE, "r") as f:
-        hashes = f.read().splitlines()
+# 拡張子が画像ファイルか判定
+def is_image_file(filename):
+    return get_file_extension(filename) in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]
 
-    return hash_val in hashes
-
-def save_hash(content):
-    """新しいファイルのハッシュを保存"""
-    hash_val = file_hash(content)
-
-    with open(HASH_STORE_FILE, "a") as f:
-        f.write(hash_val + "\n")
+# 拡張子がテキストファイルか判定
+def is_text_file(filename):
+    return get_file_extension(filename) in [".txt", ".md", ".csv", ".json"]
