@@ -10,7 +10,10 @@ app = Flask(__name__)
 # 環境変数から取得
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")  # Push送信用
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
@@ -18,7 +21,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    signature = request.headers.get("X-Line-Signature", "")
+    signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
 
     try:
@@ -31,7 +34,7 @@ def webhook():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """LINEで受け取ったテキストに対して、Dropbox解析＋通知を行う"""
+    """LINEで受け取ったメッセージに応じて処理を実行"""
     user_text = event.message.text.lower()
     if "解析" in user_text or "分析" in user_text:
         analyze_dropbox_and_notify()
@@ -40,7 +43,8 @@ def handle_message(event):
         reply = "ありがとうございます"
 
     line_bot_api.reply_message(
-        event.reply_token, TextSendMessage(text=reply)
+        event.reply_token,
+        TextSendMessage(text=reply)
     )
 
 
