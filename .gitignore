@@ -1,21 +1,55 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
 
 # 環境ファイル
 .env
+.env.*
 
-# JupyterやVSCodeの設定など
-*.ipynb
+# IDE・エディタ関連
 .vscode/
+.idea/
+*.swp
+*.swo
 
-# OSごとの不要ファイル
+# OS関連
 .DS_Store
+Thumbs.db
 
-# ログファイルや一時ファイル
+# Render用キャッシュやログ
 *.log
+*.pid
+*.db
+*.sqlite3
+
+# Dropbox認証情報（万一生成した場合）
+token.json
+refresh_token.json
+
+# キャッシュや一時ファイル
+.cache/
+temp/
+tmp/
+
+# Jupyter Notebook関連
+.ipynb_checkpoints/
+
+# バックアップ
+*.bak
+*.old
+*.orig
 *.tmp
 
-# Dropboxや個人情報系（セキュリティ）
-dropbox_token.json
-refresh_token.json
+# Mac特有のファイル
+.Spotlight-V100
+.Trashes
+
+# その他
+__archive__/
+slot-data-analyzer-backup/
