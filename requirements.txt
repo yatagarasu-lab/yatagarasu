@@ -1,37 +1,43 @@
 # =====================
-# 基本機能
+# 基本機能（必須）
 # =====================
 Flask==2.3.3
-gunicorn==21.2.0  # Render本番用 WSGIサーバー
+gunicorn==21.2.0
 line-bot-sdk==3.8.0
-openai==1.33.0  # GPT連携
+openai==1.33.0
 python-dotenv==1.0.1
 requests==2.31.0
 pytz==2024.1
 certifi==2024.6.2
 tqdm==4.66.4
-tenacity==8.2.3  # 再試行制御（OpenAI安定化用）
+tenacity==8.2.3
 
 # =====================
-# ファイル処理・画像処理
+# Dropbox連携（refreshトークン対応）
 # =====================
-pillow==10.3.0
-numpy==1.26.4
 dropbox==11.36.2
 
 # =====================
-# OCR（画像文字認識）
-# ※画像文字解析機能を使う場合のみ必要
+# ファイル処理・画像処理（必要最小限）
 # =====================
-easyocr==1.7.1
-scikit-image==0.22.0
-torch==2.3.0
-torchvision==0.18.0
-opencv-python-headless==4.9.0.80  # GUI不要な環境向け
+pillow==10.3.0
+numpy==1.26.4
 
 # =====================
-# 拡張モジュール（任意で軽量化可）
+# オプション機能（必要なら追加）
 # =====================
-python-magic==0.4.27              # ファイルタイプ判定（任意）
-moviepy==1.0.3                    # 動画処理（容量重、Renderでは非推奨）
-google-api-python-client==2.125.0  # Google Sheets連携（拡張用）
+# OCR用ライブラリ（画像文字解析を使うならON）
+# easyocr==1.7.1
+# scikit-image==0.22.0
+# torch==2.3.0
+# torchvision==0.18.0
+# opencv-python-headless==4.9.0.80
+
+# ファイルタイプ判定（任意）
+# python-magic==0.4.27
+
+# 動画処理（重いのでRender本番では非推奨）
+# moviepy==1.0.3
+
+# Google Sheets API（拡張予定があれば）
+# google-api-python-client==2.125.0
