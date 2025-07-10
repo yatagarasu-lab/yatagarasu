@@ -1,24 +1,26 @@
 services:
   - type: web
-    name: dropbox-gpt-linebot
-    runtime: python
+    name: slot-data-analyzer
     env: python
     plan: free
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    region: singapore  # 東京が無いため、近いシンガポールを選択
+    buildCommand: ""
+    startCommand: "gunicorn app:app"
+    autoDeploy: true
     envVars:
       - key: LINE_CHANNEL_SECRET
-        value: YOUR_LINE_CHANNEL_SECRET
+        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: YOUR_LINE_ACCESS_TOKEN
+        sync: false
       - key: LINE_USER_ID
-        value: YOUR_LINE_USER_ID
-      - key: OPENAI_API_KEY
-        value: YOUR_OPENAI_API_KEY
-      - key: DROPBOX_APP_KEY
-        value: YOUR_DROPBOX_APP_KEY
-      - key: DROPBOX_APP_SECRET
-        value: YOUR_DROPBOX_APP_SECRET
+        sync: false
       - key: DROPBOX_REFRESH_TOKEN
-        value: YOUR_DROPBOX_REFRESH_TOKEN
+        sync: false
+      - key: DROPBOX_APP_KEY
+        sync: false
+      - key: DROPBOX_APP_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MAX_TOKENS
+        value: "2048"
