@@ -1,99 +1,81 @@
+# gpt_analyzer.py
+
 import os
 import dropbox
-import hashlib
-import base64
+from dropbox.exceptions import AuthError
 from openai import OpenAI
-from dotenv import load_dotenv
-from utils.dropbox_utils import get_dropbox_client_with_refresh, list_files, download_file, move_file
-from utils.line_notify import send_line_push
+from utils.image_ocr import extract_text_from_image
+from utils.line_notify import push_line_message
+from utils.file_utils import list_files, download_file, is_image
+from utils.token_refresher import refresh_dropbox_access_token
 
-load_dotenv()
+# OpenAI APIキーとモデル
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
 
-# GPT初期化
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Dropboxトークン（アクセストークンは毎回更新）
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
-# 分析対象フォルダ（Dropboxアプリ内の相対パス）
-DROPBOX_FOLDER = "/Apps/slot-data-analyzer"
+# 対象フォルダ（Dropbox）
+TARGET_FOLDER = "/Apps/slot-data-analyzer"
 
-# 解析結果を保存するフォルダ
-ANALYZED_FOLDER = f"{DROPBOX_FOLDER}/analyzed"
-IGNORED_FOLDER = f"{DROPBOX_FOLDER}/ignored"
-
-# 環境変数
+# LINEユーザーID（Push先）
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 
-def file_hash(content: bytes) -> str:
-    return hashlib.md5(content).hexdigest()
-
-
-def is_text_file(file_name: str) -> bool:
-    return file_name.lower().endswith((".txt", ".log", ".csv"))
-
-
-def is_image_file(file_name: str) -> bool:
-    return file_name.lower().endswith((".jpg", ".jpeg", ".png"))
-
-
-def analyze_with_gpt(content: str, filename: str) -> str:
-    """GPTに送信して要約・解析結果を取得"""
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "以下のファイル内容を要約・分析してください。"},
-                {"role": "user", "content": content},
-            ],
-            max_tokens=2048,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"[GPTエラー] {e}"
-
-
 def analyze_dropbox_and_notify():
-    """Dropboxをスキャンし、ファイルをGPTで解析、分類・通知"""
-    dbx = get_dropbox_client_with_refresh()
-    files = list_files(DROPBOX_FOLDER, dbx)
+    """Dropboxフォルダを解析してLINEに通知するメイン関数"""
+    access_token = refresh_dropbox_access_token(DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
+    dbx = dropbox.Dropbox(oauth2_access_token=access_token)
 
-    hash_map = {}  # 重複除去用
-    summary_messages = []
+    try:
+        files = list_files(TARGET_FOLDER, dbx)
+        summaries = []
 
-    for file in files:
-        path = file.path_display
-        name = os.path.basename(path)
+        for file in files:
+            filename = file.name
+            file_path = file.path_display
+            file_bytes = download_file(file_path, dbx)
 
-        # サブフォルダはスキップ
-        if "/analyzed/" in path or "/ignored/" in path:
-            continue
+            # 画像 or テキストファイルかで分岐
+            if is_image(filename):
+                extracted_text = extract_text_from_image(file_bytes)
+                content_for_gpt = f"画像ファイル「{filename}」から抽出されたテキスト:\n{extracted_text}"
+            else:
+                try:
+                    content_for_gpt = file_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    content_for_gpt = "[非対応のファイル形式]"
 
-        content = download_file(path, dbx)
-        h = file_hash(content)
+            # GPTで要約
+            summary = summarize_with_gpt(content_for_gpt)
+            summaries.append(f"■{filename}:\n{summary.strip()}")
 
-        if h in hash_map:
-            # 重複 → 無視フォルダへ移動
-            move_file(path, f"{IGNORED_FOLDER}/{name}", dbx)
-            continue
-        hash_map[h] = path
+        # LINEへまとめて通知（長文は分割して送信）
+        final_message = "\n\n".join(summaries)
+        push_line_message(final_message, LINE_USER_ID)
 
-        # ファイルタイプ別に処理
-        if is_text_file(name):
-            decoded = content.decode("utf-8", errors="ignore")
-            result = analyze_with_gpt(decoded, name)
-            summary_messages.append(f"📄 {name}：\n{result}\n")
+    except AuthError as e:
+        push_line_message(f"[Dropbox認証エラー]: {str(e)}", LINE_USER_ID)
 
-        elif is_image_file(name):
-            result = f"🖼 {name} は画像ファイルです（OCR解析は未対応）"
-            summary_messages.append(result)
 
-        else:
-            result = f"❓ {name} は未対応の形式です"
-            summary_messages.append(result)
+def summarize_with_gpt(content: str) -> str:
+    """OpenAI GPTを使って内容を要約"""
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
-        # 処理後は analyzed フォルダへ移動
-        move_file(path, f"{ANALYZED_FOLDER}/{name}", dbx)
-
-    # LINEに送信
-    full_message = "\n\n".join(summary_messages) or "📦 Dropboxに解析対象ファイルはありませんでした。"
-    send_line_push(full_message)
+    try:
+        response = client.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[
+                {"role": "system", "content": "これはDropboxからのファイル内容です。要点を簡潔にまとめてください。"},
+                {"role": "user", "content": content}
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=0.5,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"[GPT要約エラー]: {str(e)}"
