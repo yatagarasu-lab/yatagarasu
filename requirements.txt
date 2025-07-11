@@ -1,1 +1,5 @@
 flask
+dropbox
+openai
+line-bot-sdk
+gunicorn
