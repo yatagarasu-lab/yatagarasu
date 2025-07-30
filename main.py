@@ -1,100 +1,108 @@
-from flask import Flask, request
-import dropbox
-import hashlib
 import os
-import openai
-from linebot import LineBotApi
+import hashlib
+import json
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
 from linebot.models import TextSendMessage
-from datetime import datetime
+import dropbox
+import requests
+from openai import OpenAI
+from google.generativeai import GenerativeModel, configure as configure_gemini
 
-# 環境変数から取得
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-MONITOR_FOLDER_PATH = "/Apps/slot-data-analyzer"
-
-# 初期化
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-openai.api_key = OPENAI_API_KEY
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+# --- Flask 初期化 ---
 app = Flask(__name__)
 
+# --- 環境変数から情報取得 ---
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_WATCH_FOLDER = os.getenv("DROPBOX_WATCH_FOLDER", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+REPLY_TEXT = os.getenv("REPLY_TEXT", "ありがとうございます。処理が完了しました。")
+
+# --- LINE 初期化 ---
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# --- Dropbox 初期化 ---
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
+
+# --- Gemini 初期化（任意） ---
+if GEMINI_API_KEY:
+    configure_gemini(api_key=GEMINI_API_KEY)
+
+# --- GPT 初期化 ---
+openai = OpenAI(api_key=OPENAI_API_KEY)
+
+# --- ファイルのハッシュ化（重複検出用） ---
 def file_hash(content):
-    return hashlib.md5(content).hexdigest()
+    return hashlib.sha256(content).hexdigest()
 
-def list_files(folder_path=MONITOR_FOLDER_PATH):
-    files = []
-    result = dbx.files_list_folder(folder_path)
-    files.extend(result.entries)
-    while result.has_more:
-        result = dbx.files_list_folder_continue(result.cursor)
-        files.extend(result.entries)
-    return files
-
-def download_file(file_path):
-    _, res = dbx.files_download(file_path)
-    return res.content
-
-def gpt_summary(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "以下の内容を要約・解析してください。重複や不要部分は除外してください。"},
-            {"role": "user", "content": text}
-        ]
-    )
-    return response.choices[0].message.content.strip()
-
-def notify_line(message):
+# --- ファイルをGPTで解析 ---
+def analyze_with_gpt(content, filename="ファイル"):
     try:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+        result = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{
+                "role": "user",
+                "content": f"{filename} の内容を要約・解析してください。\n\n{content[:4000]}"
+            }],
+            temperature=0.4
+        )
+        return result.choices[0].message.content
     except Exception as e:
-        print("LINE通知失敗:", e)
+        return f"[GPT解析エラー] {str(e)}"
 
-def find_duplicates_and_process(folder_path=MONITOR_FOLDER_PATH):
-    files = list_files(folder_path)
-    hash_map = {}
-    summary_log = []
+# --- Gemini解析（オプション） ---
+def analyze_with_gemini(content):
+    try:
+        model = GenerativeModel("gemini-pro")
+        res = model.generate_content(content[:4000])
+        return res.text
+    except Exception as e:
+        return f"[Gemini解析エラー] {str(e)}"
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
+# --- LINE通知 ---
+def notify_line(message):
+    line_bot_api.push_message(
+        LINE_USER_ID,
+        TextSendMessage(text=message)
+    )
 
-        if hash_value in hash_map:
-            # 重複ファイルの削除
-            dbx.files_delete_v2(path)
-            summary_log.append(f"❌ 重複削除: {path}")
-        else:
-            hash_map[hash_value] = path
-            try:
-                text = content.decode("utf-8", errors="ignore")
-                summary = gpt_summary(text)
-                summary_log.append(f"📁 {file.name}\n{summary}")
-            except Exception as e:
-                summary_log.append(f"⚠️ {file.name} は解析できませんでした: {e}")
-
-    # 通知送信（1000字以上は分割する）
-    full_message = "\n\n".join(summary_log)
-    chunks = [full_message[i:i+900] for i in range(0, len(full_message), 900)]
-    for chunk in chunks:
-        notify_line(chunk)
-
+# --- Webhook受信 ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    event_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{event_time}] Dropbox webhook 受信")
-    try:
-        find_duplicates_and_process()
-        return "OK", 200
-    except Exception as e:
-        notify_line(f"解析エラー発生: {e}")
-        return "Error", 500
+    data = request.get_json()
+    for entry in data.get("list_folder", {}).get("entries", []):
+        if entry[0] == "file":
+            path = entry[1]
+            _, res = dbx.files_download(path)
+            content = res.content.decode("utf-8", errors="ignore")
 
+            gpt_summary = analyze_with_gpt(content, filename=path)
+            gemini_summary = analyze_with_gemini(content) if GEMINI_API_KEY else None
+
+            full_message = f"✅ GPT解析:\n{gpt_summary}"
+            if gemini_summary:
+                full_message += f"\n\n🔮 Gemini解析:\n{gemini_summary}"
+
+            notify_line(full_message)
+
+    return "OK"
+
+# --- テスト用エンドポイント（起動確認用） ---
 @app.route("/", methods=["GET"])
-def health_check():
-    return "Slot Data Analyzer is running!", 200
+def index():
+    return "🟢 GPT解析BOTは稼働中です！"
 
+# --- アプリ起動 ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run()
