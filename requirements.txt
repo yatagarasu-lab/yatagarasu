@@ -1,5 +1,6 @@
 flask
-dropbox
-openai
-line-bot-sdk
 gunicorn
+line-bot-sdk==3.4.0
+openai
+dropbox
+google-generativeai
