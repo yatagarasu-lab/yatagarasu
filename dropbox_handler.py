@@ -1,35 +1,47 @@
+# dropbox_handler.py
+
 import os
-import dropbox
+import base64
+import requests
+from datetime import datetime
 
-# Dropboxクライアント（リフレッシュトークン対応）
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
-    app_key=os.getenv("DROPBOX_APP_KEY"),
-    app_secret=os.getenv("DROPBOX_APP_SECRET")
-)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR", "GPT Bot <bot@example.com>")
 
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    """Dropboxフォルダ内のファイル一覧を取得"""
+# GitHubに自動Push（dropbox_updatesディレクトリ用）
+def push_summary_to_github(summary_text):
     try:
-        result = dbx.files_list_folder(folder_path)
-        return result.entries
-    except dropbox.exceptions.ApiError as e:
-        print(f"[エラー] ファイル一覧取得失敗: {e}")
-        return []
+        filename = f"dropbox_updates/{datetime.now().strftime('%Y-%m-%d_%H-%M')}_summary.md"
+        commit_message = f"自動更新: Dropboxファイル要約（{filename}）"
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
 
-def download_file(path):
-    """Dropboxからファイルをダウンロードしてバイナリを返す"""
-    try:
-        _, res = dbx.files_download(path)
-        return res.content
-    except dropbox.exceptions.HttpError as e:
-        print(f"[エラー] ファイルダウンロード失敗: {e}")
-        return b""
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
 
-def delete_file(path):
-    """Dropboxの指定ファイルを削除"""
-    try:
-        dbx.files_delete_v2(path)
-        print(f"[削除] 重複ファイル削除: {path}")
-    except dropbox.exceptions.ApiError as e:
-        print(f"[削除失敗] {path}: {e}")
+        # 既存ファイル確認（存在していたらSHAを取得）
+        sha = None
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 200:
+            sha = resp.json().get("sha")
+
+        payload = {
+            "message": commit_message,
+            "content": base64.b64encode(summary_text.encode()).decode(),
+            "branch": GITHUB_BRANCH,
+            "committer": {
+                "name": GITHUB_COMMIT_AUTHOR.split("<")[0].strip(),
+                "email": GITHUB_COMMIT_AUTHOR.split("<")[1].replace(">", "").strip()
+            }
+        }
+        if sha:
+            payload["sha"] = sha
+
+        result = requests.put(url, headers=headers, json=payload)
+        return result.status_code in [200, 201], result.json() if result.status_code in [200, 201] else result.text
+
+    except Exception as e:
+        return False, str(e)
