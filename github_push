@@ -1,0 +1,34 @@
+import os
+import base64
+import requests
+
+def push_to_github(filename, content, commit_message):
+    github_token = os.getenv("GITHUB_TOKEN")
+    repo = os.getenv("GITHUB_REPO")
+    branch = os.getenv("GITHUB_BRANCH", "main")
+    author = os.getenv("GITHUB_COMMIT_AUTHOR", "AutoPush <bot@example.com>")
+
+    api_url = f"https://api.github.com/repos/{repo}/contents/{filename}"
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    # 既存ファイルがあるか確認（SHAが必要）
+    get_resp = requests.get(api_url, headers=headers)
+    sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+
+    data = {
+        "message": commit_message,
+        "content": base64.b64encode(content.encode()).decode(),
+        "branch": branch,
+        "committer": {
+            "name": author.split(" <")[0],
+            "email": author.split("<")[1].strip(">")
+        }
+    }
+    if sha:
+        data["sha"] = sha
+
+    resp = requests.put(api_url, headers=headers, json=data)
+    return resp.status_code, resp.json()
