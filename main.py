@@ -114,7 +114,6 @@ def push_to_github(filename, content, commit_message):
             "Authorization": f"token {GITHUB_TOKEN}",
             "Accept": "application/vnd.github.v3+json"
         }
-        # 既存ファイルのSHA取得
         sha = None
         get_resp = requests.get(url, headers=headers)
         if get_resp.status_code == 200:
@@ -140,57 +139,7 @@ def push_to_github(filename, content, commit_message):
     except Exception as e:
         return False, str(e)
 
-# ==== Dropbox → GPT → GitHub 要約保存 ====
-@app.route("/dropbox_auto", methods=["POST"])
-def dropbox_auto_summary():
-    try:
-        from github_helper import is_duplicate_github_file
-
-        path = get_latest_dropbox_file()
-        if not path:
-            notify_line("❌ Dropboxフォルダにファイルが見つかりません。")
-            return "no file", 200
-
-        content = download_dropbox_file_content(path)
-        if not content:
-            notify_line("❌ Dropboxファイルの中身取得に失敗しました。")
-            return "error", 500
-
-        notify_line("📥 Dropboxの最新ファイルを取得しました。\n要約を開始します。")
-        summary = gpt_summarize(content)
-
-        today = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        github_filename = f"dropbox_summary_{today}.md"
-
-        if is_duplicate_github_file(github_filename, summary):
-            notify_line(f"⚠️ GitHubに同一ファイルが既に存在します：{github_filename}")
-        else:
-            status, result = push_to_github(
-                filename=github_filename,
-                content=summary,
-                commit_message="📄 Dropboxファイル要約を追加"
-            )
-            if status:
-                notify_line(f"✅ GitHubに要約をPushしました：{github_filename}")
-            else:
-                notify_line(f"❌ GitHubへのPush失敗：{result}")
-
-        # ✅ 強化版 GitHub 保存（任意）
-        try:
-            from dropbox_handler import push_summary_to_github
-            status2, _ = push_summary_to_github(summary)
-            notify_line(f"📁 強化版GitHub保存完了: {status2}")
-        except Exception as e:
-            notify_line(f"⚠️ 強化版GitHub保存でエラー: {e}")
-
-        return "ok", 200
-
-    except Exception as e:
-        print("❌ dropbox_auto_summary エラー:", e)
-        notify_line(f"❌ Dropbox要約処理エラー:\n{e}")
-        abort(500)
-
-# ==== LINE BOT Webhook ====
+# ==== LINE Webhook ====
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -203,14 +152,76 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    incoming_text = event.message.text
-    reply_text = f"受信しました：{incoming_text}"
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    incoming_text = event.message.text.strip()
 
-# ==== Dropbox Webhook 認証用 ====
+    if incoming_text == "要約開始":
+        notify_line("🤖 要約トリガーを受信しました。処理を開始します…")
+        try:
+            from github_helper import is_duplicate_github_file
+            from dropbox_handler import push_summary_to_github
+
+            path = get_latest_dropbox_file()
+            if not path:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="❌ Dropboxにファイルが見つかりません。")
+                )
+                return
+
+            content = download_dropbox_file_content(path)
+            if not content:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="❌ Dropboxファイルの読み取りに失敗しました。")
+                )
+                return
+
+            summary = gpt_summarize(content)
+            today = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            github_filename = f"dropbox_summary_{today}.md"
+
+            if is_duplicate_github_file(github_filename, summary):
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"⚠️ 同一ファイルが既にGitHubに存在します：{github_filename}")
+                )
+            else:
+                status, result = push_to_github(
+                    filename=github_filename,
+                    content=summary,
+                    commit_message="📄 Dropboxファイル要約を追加"
+                )
+                if status:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text=f"✅ 要約をGitHubへ保存しました：{github_filename}")
+                    )
+                else:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text=f"❌ GitHubへの保存に失敗しました：{result}")
+                    )
+
+            try:
+                status2, _ = push_summary_to_github(summary)
+                notify_line(f"📁 強化版GitHub保存完了: {status2}")
+            except Exception as e:
+                notify_line(f"⚠️ 強化版GitHub保存でエラー: {e}")
+
+        except Exception as e:
+            notify_line(f"❌ トリガー処理中にエラーが発生しました: {e}")
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=f"❌ エラーが発生しました：{e}")
+            )
+    else:
+        reply_text = f"受信しました：{incoming_text}"
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply_text)
+        )
+
+# ==== Dropbox Webhook ====
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -219,7 +230,7 @@ def webhook():
         print("📦 Dropbox Webhook POST 受信（未使用）")
         return "OK", 200
 
-# ==== 動作確認用 ====
+# ==== 動作確認 ====
 @app.route("/", methods=["GET"])
 def home():
     return "📡 Yatagarasu GPT Auto System Running", 200
