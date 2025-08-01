@@ -3,7 +3,6 @@ import requests
 import base64
 from flask import Flask, request, abort
 import openai
-import dropbox
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -20,7 +19,7 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: username/repo
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR", "GPT Bot <bot@example.com>")
 
@@ -103,7 +102,17 @@ def push_to_github(filename, content, commit_message):
     except Exception as e:
         return False, str(e)
 
-# ==== Dropbox Webhookエンドポイント ====
+# ==== Dropbox Webhook認証エンドポイント ====
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        return challenge, 200
+    elif request.method == "POST":
+        print("📦 Dropbox Webhook POST 受信（未使用エンドポイント）")
+        return "OK", 200
+
+# ==== Dropbox通知処理用エンドポイント ====
 @app.route("/dropbox_webhook", methods=["POST"])
 def dropbox_webhook():
     try:
@@ -127,7 +136,7 @@ def dropbox_webhook():
         notify_line(f"❌ Dropbox Webhook処理エラー:\n{e}")
         abort(500)
 
-# ==== LINE BOT Webhookエンドポイント ====
+# ==== LINE BOT Webhook ====
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
@@ -148,11 +157,10 @@ def handle_message(event):
         TextSendMessage(text=reply_text)
     )
 
-# ==== Render確認用 ====
+# ==== Render動作確認 ====
 @app.route("/", methods=["GET"])
 def home():
     return "📡 Yatagarasu GPT Auto System Running", 200
 
-# ==== 起動 ====
 if __name__ == "__main__":
     app.run()
