@@ -1,15 +1,21 @@
 services:
   - type: web
-    name: yatagarasu
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    name: yatagarasu_et_labo
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn main:app"
     envVars:
       - key: OPENAI_API_KEY
         sync: false
-      - key: DROPBOX_REFRESH_TOKEN
+      - key: LINE_CHANNEL_SECRET
         sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
-      - key: LINE_CHANNEL_SECRET
+      - key: DROPBOX_REFRESH_TOKEN
+        sync: false
+      - key: DROPBOX_CLIENT_ID
+        sync: false
+      - key: DROPBOX_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_PAT
         sync: false
