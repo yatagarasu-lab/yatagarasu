@@ -1,20 +1,25 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
+# ── 基本ルート ─────────────────────
+@app.route('/')
 def index():
-    return "🟢 GPT解析BOTは待機中です"
+    return 'Webhook server is running on Render!'
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        # Dropboxからの確認用 Challenge 応答
-        challenge = request.args.get("challenge")
-        return challenge if challenge else "No challenge found", 200
-    elif request.method == "POST":
-        print("📩 Webhook POST received from Dropbox")
-        return "Webhook received", 200
+# ── Dropbox Webhook受信用エンドポイント ───────
+@app.route('/webhook', methods=['GET', 'POST'])
+def handle_webhook():
+    if request.method == 'GET':
+        # Dropboxの確認用 (チャレンジ応答)
+        challenge = request.args.get('challenge')
+        return challenge if challenge else 'No challenge param', 200
+    elif request.method == 'POST':
+        # 通常の通知（ここに自動解析処理などを追加）
+        print('Received Dropbox webhook POST')
+        print(request.json)  # JSON内容をログ出力
+        return 'OK', 200
 
-if __name__ == "__main__":
-    app.run()
+# ── アプリ起動 ─────────────────────
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
