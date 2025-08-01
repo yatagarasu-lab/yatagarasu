@@ -4,7 +4,7 @@ import openai
 import dropbox
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
-from github_push import push_to_github  # 別ファイルで定義
+from github_push import push_to_github  # ← ✅ ドット修正済み
 
 app = Flask(__name__)
 
