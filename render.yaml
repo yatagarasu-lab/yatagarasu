@@ -2,9 +2,9 @@ services:
   - type: web
     name: yatagarasu_et_labo
     env: python
+    runtime: python3.11  # ←★これを追加（必須！）
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn main:app"
-    runtime: python3.11
     envVars:
       - key: OPENAI_API_KEY
         sync: false
