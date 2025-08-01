@@ -75,7 +75,7 @@ def push_to_github(filename, content, commit_message):
             "Accept": "application/vnd.github.v3+json"
         }
 
-        # 既存SHA取得
+        # 既存ファイルのSHA取得（上書き用）
         sha = None
         get_resp = requests.get(url, headers=headers)
         if get_resp.status_code == 200:
@@ -109,7 +109,7 @@ def webhook():
         challenge = request.args.get("challenge")
         return challenge, 200
     elif request.method == "POST":
-        print("📦 Dropbox Webhook POST 受信（未使用エンドポイント）")
+        print("📦 Dropbox Webhook POST 受信（未使用）")
         return "OK", 200
 
 # ==== Dropbox通知処理用エンドポイント ====
