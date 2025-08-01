@@ -4,35 +4,26 @@ import openai
 import dropbox
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
+from github_push import push_to_github  # 別ファイルで定義
 
 app = Flask(__name__)
 
-# === 環境変数の読み込み ===
+# ==== 環境変数の読み込み ====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
-DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# GitHub Push 用
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR")
 
-# === 安全確認 ===
-if not all([OPENAI_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID,
-            DROPBOX_CLIENT_ID, DROPBOX_CLIENT_SECRET, DROPBOX_REFRESH_TOKEN]):
-    raise ValueError("必要な環境変数が設定されていません")
-
-# === クライアント初期化 ===
+# ==== クライアント初期化 ====
 openai.api_key = OPENAI_API_KEY
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-
-# Dropbox（refresh_token 方式）
-dbx = dropbox.Dropbox(
-    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-    app_key=DROPBOX_CLIENT_ID,
-    app_secret=DROPBOX_CLIENT_SECRET
-)
-
-# === ルーティング ===
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -45,14 +36,25 @@ def webhook():
             print("⚠️ エントリなし")
             return "no change", 200
 
-        notify_line("📥 Dropboxにファイルが追加されました。処理を開始します。")
-        summary = gpt_summarize("新しいファイルの要約テストです。")
+        notify_line("📥 Dropboxにファイルが追加されました。要約を開始します。")
 
+        # 仮のGPT要約処理（ファイル未取得のテスト用）
+        summary = gpt_summarize("新しいファイルの要約テストです。")
         notify_line(f"✅ GPT要約完了:\n{summary}")
+
+        # GitHubにファイルPush（デモファイル）
+        status, response = push_to_github(
+            filename="auto_update.py",
+            content="print('Hello from GPT!')",
+            commit_message="自動更新：Dropbox経由で取得"
+        )
+        notify_line(f"📤 GitHub自動Push完了\n結果: {status}")
+
         return "ok", 200
 
     except Exception as e:
         print("❌ エラー:", e)
+        notify_line(f"❌ Webhook処理エラー:\n{e}")
         abort(500)
 
 def gpt_summarize(text):
