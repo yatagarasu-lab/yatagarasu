@@ -20,7 +20,6 @@ DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
@@ -145,6 +144,8 @@ def push_to_github(filename, content, commit_message):
 @app.route("/dropbox_auto", methods=["POST"])
 def dropbox_auto_summary():
     try:
+        from github_helper import is_duplicate_github_file
+
         path = get_latest_dropbox_file()
         if not path:
             notify_line("❌ Dropboxフォルダにファイルが見つかりません。")
@@ -161,18 +162,20 @@ def dropbox_auto_summary():
         today = datetime.now().strftime("%Y-%m-%d_%H-%M")
         github_filename = f"dropbox_summary_{today}.md"
 
-        status, result = push_to_github(
-            filename=github_filename,
-            content=summary,
-            commit_message="📄 Dropboxファイル要約を追加"
-        )
-
-        if status:
-            notify_line(f"✅ GitHubに要約をPushしました：{github_filename}")
+        if is_duplicate_github_file(github_filename, summary):
+            notify_line(f"⚠️ GitHubに同一ファイルが既に存在します：{github_filename}")
         else:
-            notify_line(f"❌ GitHubへのPush失敗：{result}")
+            status, result = push_to_github(
+                filename=github_filename,
+                content=summary,
+                commit_message="📄 Dropboxファイル要約を追加"
+            )
+            if status:
+                notify_line(f"✅ GitHubに要約をPushしました：{github_filename}")
+            else:
+                notify_line(f"❌ GitHubへのPush失敗：{result}")
 
-        # ✅ 強化版 GitHub 保存（任意の別モジュール）
+        # ✅ 強化版 GitHub 保存（任意）
         try:
             from dropbox_handler import push_summary_to_github
             status2, _ = push_summary_to_github(summary)
@@ -192,7 +195,6 @@ def dropbox_auto_summary():
 def callback():
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
