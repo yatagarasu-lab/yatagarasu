@@ -1,0 +1,1 @@
+# Handles GitHub duplicate checking
