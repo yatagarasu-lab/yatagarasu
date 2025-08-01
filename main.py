@@ -1,31 +1,35 @@
 import os
 import requests
+import base64
 from flask import Flask, request, abort
 import openai
 import dropbox
-from linebot import LineBotApi
-from linebot.models import TextSendMessage
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 app = Flask(__name__)
 
-# ==== 環境変数の読み込み ====
+# ==== 環境変数 ====
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")  # 例: username/repo
+GITHUB_REPO = os.getenv("GITHUB_REPO")  # ex: username/repo
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR", "GPT Bot <bot@example.com>")
 
-# ==== クライアント初期化 ====
+# ==== 初期化 ====
 openai.api_key = OPENAI_API_KEY
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-
+# ==== Dropboxアクセストークン取得 ====
 def get_dropbox_access_token():
     url = "https://api.dropbox.com/oauth2/token"
     data = {
@@ -38,7 +42,7 @@ def get_dropbox_access_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-
+# ==== GPT要約 ====
 def gpt_summarize(text):
     try:
         response = openai.ChatCompletion.create(
@@ -53,7 +57,7 @@ def gpt_summarize(text):
         print("GPT要約エラー:", e)
         return "要約に失敗しました。"
 
-
+# ==== LINE通知 ====
 def notify_line(message):
     try:
         line_bot_api.push_message(
@@ -63,7 +67,7 @@ def notify_line(message):
     except Exception as e:
         print("LINE通知エラー:", e)
 
-
+# ==== GitHubファイルPush ====
 def push_to_github(filename, content, commit_message):
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
@@ -72,7 +76,7 @@ def push_to_github(filename, content, commit_message):
             "Accept": "application/vnd.github.v3+json"
         }
 
-        # 既存ファイルのSHA取得（存在しない場合はNone）
+        # 既存SHA取得
         sha = None
         get_resp = requests.get(url, headers=headers)
         if get_resp.status_code == 200:
@@ -80,7 +84,7 @@ def push_to_github(filename, content, commit_message):
 
         payload = {
             "message": commit_message,
-            "content": content.encode("utf-8").decode("utf-8").encode("base64").decode(),
+            "content": base64.b64encode(content.encode()).decode(),
             "branch": GITHUB_BRANCH,
             "committer": {
                 "name": GITHUB_COMMIT_AUTHOR.split("<")[0].strip(),
@@ -96,42 +100,59 @@ def push_to_github(filename, content, commit_message):
             return True, response.json()
         else:
             return False, response.text
-
     except Exception as e:
         return False, str(e)
 
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
+# ==== Dropbox Webhookエンドポイント ====
+@app.route("/dropbox_webhook", methods=["POST"])
+def dropbox_webhook():
     try:
-        body = request.json
-        print("📦 Dropbox Webhook 受信:", body)
+        body = request.get_data(as_text=True)
+        print("📦 Dropbox Webhook受信:", body)
 
         notify_line("📥 Dropboxにファイルが追加されました。要約を開始します。")
-
         summary = gpt_summarize("新しいファイルの要約テストです。")
         notify_line(f"✅ GPT要約完了:\n{summary}")
 
-        # GitHub Push処理
         status, response = push_to_github(
             filename="auto_update.py",
             content="print('Hello from GPT!')",
-            commit_message="自動更新：Dropbox経由で取得"
+            commit_message="自動更新：Dropbox連携テスト"
         )
         notify_line(f"📤 GitHub自動Push完了\n結果: {status}")
 
         return "ok", 200
-
     except Exception as e:
-        print("❌ Webhook処理エラー:", e)
-        notify_line(f"❌ Webhook処理エラー:\n{e}")
+        print("❌ Dropbox Webhook処理エラー:", e)
+        notify_line(f"❌ Dropbox Webhook処理エラー:\n{e}")
         abort(500)
 
+# ==== LINE BOT Webhookエンドポイント ====
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
 
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return "OK", 200
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    incoming_text = event.message.text
+    reply_text = f"受信しました：{incoming_text}"
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
+
+# ==== Render確認用 ====
 @app.route("/", methods=["GET"])
 def home():
     return "📡 Yatagarasu GPT Auto System Running", 200
 
-
+# ==== 起動 ====
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
