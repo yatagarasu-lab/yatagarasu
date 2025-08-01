@@ -1,75 +1,77 @@
 import os
-import json
-import dropbox
-import openai
 from flask import Flask, request, abort
+import openai
+import dropbox
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 
-# 初期化
 app = Flask(__name__)
 
-# 環境変数読み込み
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# 環境変数の読み込み
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# 各APIクライアント
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+# クライアントの初期化
 openai.api_key = OPENAI_API_KEY
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Yatagarasu BOT is alive!"
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        body = request.json
+        print("📦 Dropbox Webhook 受信:", body)
 
-@app.route("/dropbox_webhook", methods=["GET"])
-def verify():
-    return request.args.get("challenge")
+        # ファイル変更のパス取得（簡易処理）
+        entries = body.get("list_folder", {}).get("accounts", [])
+        if not entries:
+            print("⚠️ エントリなし")
+            return "no change", 200
 
-@app.route("/dropbox_webhook", methods=["POST"])
-def dropbox_webhook():
-    data = request.get_json()
-    print("Webhook received:", json.dumps(data))
+        # TODO: 本来は Dropbox API でファイルリスト取得して処理
+        notify_line("📥 Dropboxにファイルが追加されました。処理を開始します。")
+        # 仮のGPT要約処理（実ファイルなし）
+        summary = gpt_summarize("新しいファイルの要約テストです。")
 
-    for account in data.get("list_folder", {}).get("accounts", []):
-        process_dropbox_files()
+        # 通知
+        notify_line(f"✅ GPT要約完了:\n{summary}")
+        return "ok", 200
 
-    return "", 200
+    except Exception as e:
+        print("❌ エラー:", e)
+        abort(500)
 
-def process_dropbox_files():
-    folder_path = "/Apps/slot-data-analyzer"
-    entries = dbx.files_list_folder(folder_path).entries
-
-    for entry in entries:
-        if isinstance(entry, dropbox.files.FileMetadata):
-            file_path = entry.path_lower
-            _, res = dbx.files_download(file_path)
-            content = res.content.decode("utf-8", errors="ignore")
-
-            summary = ask_gpt(content)
-
-            send_line_message(f"🧠 解析結果:\n\n{summary}")
-
-def ask_gpt(text):
+def gpt_summarize(text):
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "あなたはDropbox上のファイルを要約・分析するアシスタントです。"},
-                {"role": "user", "content": text}
-            ]
+            model="gpt-4",
+            messages=[{
+                "role": "system",
+                "content": "以下の文章を簡潔に要約してください。"
+            }, {
+                "role": "user",
+                "content": text
+            }]
         )
-        return response["choices"][0]["message"]["content"]
+        return response.choices[0].message["content"]
     except Exception as e:
-        return f"[GPTエラー] {str(e)}"
+        print("GPT要約エラー:", e)
+        return "要約に失敗しました。"
 
-def send_line_message(message):
+def notify_line(message):
     try:
-        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+        line_bot_api.push_message(
+            LINE_USER_ID,
+            TextSendMessage(text=message)
+        )
     except Exception as e:
-        print("LINE送信エラー:", e)
+        print("LINE通知エラー:", e)
+
+@app.route("/", methods=["GET"])
+def home():
+    return "📡 Yatagarasu GPT Auto System Running", 200
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
