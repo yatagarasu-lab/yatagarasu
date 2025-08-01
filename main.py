@@ -2,9 +2,9 @@ import os
 from flask import Flask, request, abort
 import openai
 import dropbox
+import requests
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
-from github_push import push_to_github  # ← ✅ ドット修正済み
 
 app = Flask(__name__)
 
@@ -18,7 +18,7 @@ LINE_USER_ID = os.getenv("LINE_USER_ID")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR")
+GITHUB_COMMIT_AUTHOR = os.getenv("GITHUB_COMMIT_AUTHOR", "GPT PushBot <bot@example.com>")
 
 # ==== クライアント初期化 ====
 openai.api_key = OPENAI_API_KEY
@@ -38,11 +38,9 @@ def webhook():
 
         notify_line("📥 Dropboxにファイルが追加されました。要約を開始します。")
 
-        # 仮のGPT要約処理（ファイル未取得のテスト用）
         summary = gpt_summarize("新しいファイルの要約テストです。")
         notify_line(f"✅ GPT要約完了:\n{summary}")
 
-        # GitHubにファイルPush（デモファイル）
         status, response = push_to_github(
             filename="auto_update.py",
             content="print('Hello from GPT!')",
@@ -79,6 +77,38 @@ def notify_line(message):
         )
     except Exception as e:
         print("LINE通知エラー:", e)
+
+# ✅ GitHub自動Push関数をここに定義（main.py内に埋め込み）
+def push_to_github(filename, content, commit_message):
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+        headers = {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json"
+        }
+
+        # 既存ファイル確認（SHA取得のため）
+        r = requests.get(url, headers=headers)
+        sha = r.json().get("sha") if r.status_code == 200 else None
+
+        payload = {
+            "message": commit_message,
+            "content": content.encode("utf-8").decode("utf-8").encode("base64").decode(),
+            "branch": GITHUB_BRANCH,
+            "committer": {
+                "name": GITHUB_COMMIT_AUTHOR.split("<")[0].strip(),
+                "email": GITHUB_COMMIT_AUTHOR.split("<")[1].replace(">", "").strip()
+            }
+        }
+        if sha:
+            payload["sha"] = sha
+
+        res = requests.put(url, headers=headers, json=payload)
+        return res.status_code, res.json()
+
+    except Exception as e:
+        print("GitHub Pushエラー:", e)
+        return "error", str(e)
 
 @app.route("/", methods=["GET"])
 def home():
