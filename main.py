@@ -164,3 +164,88 @@ def home():
 
 if __name__ == "__main__":
     app.run()
+    import json
+from datetime import datetime
+
+# ==== Dropbox内の最新ファイル取得 ====
+def get_latest_dropbox_file():
+    try:
+        access_token = get_dropbox_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        list_folder_url = "https://api.dropboxapi.com/2/files/list_folder"
+        data = {
+            "path": "/Apps/slot-data-analyzer",
+            "recursive": False
+        }
+
+        resp = requests.post(list_folder_url, headers=headers, json=data)
+        resp.raise_for_status()
+        entries = resp.json().get("entries", [])
+
+        # 最新のファイルを取得
+        files = [f for f in entries if f[".tag"] == "file"]
+        if not files:
+            return None
+        latest = max(files, key=lambda x: x["client_modified"])
+        return latest["path_lower"]
+    except Exception as e:
+        print("❌ Dropboxファイル取得エラー:", e)
+        return None
+
+# ==== Dropboxファイルの中身を取得 ====
+def download_dropbox_file_content(path):
+    try:
+        access_token = get_dropbox_access_token()
+        url = "https://content.dropboxapi.com/2/files/download"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Dropbox-API-Arg": json.dumps({"path": path})
+        }
+        resp = requests.post(url, headers=headers)
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        print("❌ Dropboxファイルダウンロードエラー:", e)
+        return None
+
+# ==== Dropbox→GPT→GitHub自動処理 ====
+@app.route("/dropbox_auto", methods=["POST"])
+def dropbox_auto_summary():
+    try:
+        path = get_latest_dropbox_file()
+        if not path:
+            notify_line("❌ Dropboxフォルダにファイルが見つかりません。")
+            return "no file", 200
+
+        content = download_dropbox_file_content(path)
+        if not content:
+            notify_line("❌ Dropboxファイルの中身取得に失敗しました。")
+            return "error", 500
+
+        notify_line("📥 Dropboxの最新ファイルを取得しました。\n要約を開始します。")
+        summary = gpt_summarize(content)
+
+        # ファイル名を日付付きで生成
+        today = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        github_filename = f"dropbox_summary_{today}.md"
+
+        # GitHubにPush
+        status, result = push_to_github(
+            filename=github_filename,
+            content=summary,
+            commit_message="📄 Dropboxファイル要約を追加"
+        )
+
+        if status:
+            notify_line(f"✅ GitHubに要約をPushしました：{github_filename}")
+        else:
+            notify_line(f"❌ GitHubへのPush失敗：{result}")
+
+        return "ok", 200
+    except Exception as e:
+        print("❌ dropbox_auto_summary エラー:", e)
+        notify_line(f"❌ Dropbox要約処理エラー:\n{e}")
+        abort(500)
