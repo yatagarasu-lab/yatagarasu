@@ -3,18 +3,18 @@ from flask import Flask, request, abort
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
-def home():
-    return "OK", 200  # 動作確認用
+def index():
+    return "LINE Bot Webhook Server Running", 200
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
+@app.route("/callback", methods=["POST"])
+def callback():
     try:
-        body = request.get_data(as_text=True)
-        print(f"Received webhook body: {body}")
-        return "OK", 200
+        body = request.get_json()
+        print("Received webhook payload:", body)
+        return "OK", 200  # これが重要：LINEに200を返す！
     except Exception as e:
-        print(f"Error in webhook: {e}")
-        abort(500)
+        print("Error handling webhook:", e)
+        abort(400)
 
 if __name__ == "__main__":
     app.run()
