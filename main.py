@@ -1,65 +1,75 @@
 import os
 import json
-import openai
 import dropbox
+import openai
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from google.cloud import vision
-from werkzeug.utils import secure_filename
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
 
-# --- 環境変数の読み込み ---
-DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
-DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
-DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
-LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-GOOGLE_CLOUD_VISION_KEY = os.environ["GOOGLE_CLOUD_VISION_KEY"]
-
-# --- クライアント初期化 ---
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
-vision_client = vision.ImageAnnotatorClient.from_service_account_json(GOOGLE_CLOUD_VISION_KEY)
-
-# --- Flask アプリケーション ---
+# 初期化
 app = Flask(__name__)
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers["X-Line-Signature"]
-    body = request.get_data(as_text=True)
+# 環境変数読み込み
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        abort(400)
+# 各APIクライアント
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-    return "OK"
+@app.route("/", methods=["GET"])
+def index():
+    return "Yatagarasu BOT is alive!"
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_text = event.message.text
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "あなたはDropboxとLINE Botを使ったファイル解析エージェントです。"},
-            {"role": "user", "content": user_text}
-        ]
-    )
-    reply = response.choices[0].message.content
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+@app.route("/dropbox_webhook", methods=["GET"])
+def verify():
+    return request.args.get("challenge")
 
-@app.route("/dropbox-webhook", methods=["GET", "POST"])
+@app.route("/dropbox_webhook", methods=["POST"])
 def dropbox_webhook():
-    if request.method == "GET":
-        return request.args.get("challenge")
-    elif request.method == "POST":
-        # ここにDropboxのファイル解析処理を書く
-        print("Dropboxファイル変更を検知しました。")
-        return "OK"
+    data = request.get_json()
+    print("Webhook received:", json.dumps(data))
 
-# --- メイン関数 ---
+    for account in data.get("list_folder", {}).get("accounts", []):
+        process_dropbox_files()
+
+    return "", 200
+
+def process_dropbox_files():
+    folder_path = "/Apps/slot-data-analyzer"
+    entries = dbx.files_list_folder(folder_path).entries
+
+    for entry in entries:
+        if isinstance(entry, dropbox.files.FileMetadata):
+            file_path = entry.path_lower
+            _, res = dbx.files_download(file_path)
+            content = res.content.decode("utf-8", errors="ignore")
+
+            summary = ask_gpt(content)
+
+            send_line_message(f"🧠 解析結果:\n\n{summary}")
+
+def ask_gpt(text):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "あなたはDropbox上のファイルを要約・分析するアシスタントです。"},
+                {"role": "user", "content": text}
+            ]
+        )
+        return response["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"[GPTエラー] {str(e)}"
+
+def send_line_message(message):
+    try:
+        line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=message))
+    except Exception as e:
+        print("LINE送信エラー:", e)
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run()
