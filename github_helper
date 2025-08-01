@@ -1,0 +1,26 @@
+# github_helper.py
+import hashlib
+import base64
+import requests
+import os
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
+
+def is_duplicate_github_file(filename, new_content):
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{filename}"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            return False  # ファイルがない＝重複なし
+
+        existing_content = base64.b64decode(resp.json()["content"]).decode()
+        return hashlib.sha256(existing_content.encode()).hexdigest() == hashlib.sha256(new_content.encode()).hexdigest()
+    except Exception as e:
+        print("❌ GitHub重複チェックエラー:", e)
+        return False
