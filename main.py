@@ -1,47 +1,43 @@
-# --- Dropbox to GoogleDrive Task ---
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-import dropbox
 import os
-import io
-
-def transfer_dropbox_to_gdrive():
-    try:
-        # Dropbox 認証
-        dbx = dropbox.Dropbox(os.getenv("DROPBOX_ACCESS_TOKEN"))
-        dropbox_path = "/Apps/slot-data-analyzer"
-        entries = dbx.files_list_folder(dropbox_path).entries
-
-        # Google Drive 認証
-        gauth = GoogleAuth()
-        gauth.LocalWebserverAuth()
-        drive = GoogleDrive(gauth)
-
-        for entry in entries:
-            if isinstance(entry, dropbox.files.FileMetadata):
-                file_path = entry.path_display
-                _, ext = os.path.splitext(file_path)
-                _, res = dbx.files_download(file_path)
-                content = res.content
-
-                gfile = drive.CreateFile({'title': os.path.basename(file_path)})
-                if ext in ['.txt', '.csv', '.json']:
-                    gfile.SetContentString(content.decode())
-                else:
-                    gfile.SetContentString("バイナリファイル（省略）")
-                gfile.Upload()
-    except Exception as e:
-        print("転送エラー:", str(e))
-        import dropbox
 import datetime
-import os
+import dropbox
+from flask import Flask, request
 
+app = Flask(__name__)
+
+# === GPTログ保存用関数 ===
 def save_gpt_output_to_dropbox(content: str, filename_prefix="gpt_log"):
     try:
-        dbx = dropbox.Dropbox(os.getenv("DROPBOX_ACCESS_TOKEN"))
+        access_token = os.getenv("DROPBOX_ACCESS_TOKEN")
+        if not access_token:
+            print("❌ DROPBOX_ACCESS_TOKEN が設定されていません。")
+            return
+
+        dbx = dropbox.Dropbox(access_token)
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"/Apps/slot-data-analyzer/{filename_prefix}_{now}.txt"
-        dbx.files_upload(content.encode(), filename, mode=dropbox.files.WriteMode.overwrite)
-        print(f"✅ 保存完了: {filename}")
+        dbx.files_upload(content.encode('utf-8'), filename, mode=dropbox.files.WriteMode.overwrite)
+        print(f"✅ GPT出力ログをDropboxに保存しました: {filename}")
     except Exception as e:
-        print(f"❌ 保存エラー: {e}")
+        print(f"❌ Dropbox保存エラー: {e}")
+
+# === Webhookの受信例 ===
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    if not data:
+        return "No JSON received", 400
+
+    # GPTからの出力がここにある想定（仮置き）
+    gpt_reply = "これはGPTからの出力です（例）"
+
+    # Dropboxに保存
+    save_gpt_output_to_dropbox(gpt_reply)
+
+    return "OK", 200
+
+# === Render動作用エントリーポイント ===
+if __name__ == "__main__":
+    # テスト実行（Render以外のローカル検証用）
+    save_gpt_output_to_dropbox("これは手動で呼び出したGPTログの保存テストです。")
+    app.run(host="0.0.0.0", port=5000)
