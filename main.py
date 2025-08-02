@@ -1,84 +1,86 @@
 from flask import Flask, request, jsonify
-import dropbox
-import os
-import hashlib
-from datetime import datetime
 import requests
+import json
+import os
+import time
+import base64
 
 app = Flask(__name__)
 
-# ✅ Dropbox環境変数
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+# === Dropbox API（リフレッシュトークン方式） ===
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# ✅ Full Dropbox構成用のファイルパス（先頭スラッシュ必須）
-DROPBOX_PATH = "/gpt_log.txt"
-
-# 🔄 アクセストークンを取得
-def get_access_token():
+def get_dropbox_access_token():
     url = "https://api.dropbox.com/oauth2/token"
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
     data = {
         "grant_type": "refresh_token",
         "refresh_token": DROPBOX_REFRESH_TOKEN,
         "client_id": DROPBOX_CLIENT_ID,
-        "client_secret": DROPBOX_CLIENT_SECRET,
+        "client_secret": DROPBOX_CLIENT_SECRET
     }
-    res = requests.post(url, headers=headers, data=data)
-    return res.json()["access_token"]
+    response = requests.post(url, data=data)
+    return response.json().get("access_token")
 
-# ✅ Dropboxに追記保存
-def append_to_dropbox(text):
-    access_token = get_access_token()
-    dbx = dropbox.Dropbox(access_token)
+@app.route("/dropbox-files", methods=["GET"])
+def list_dropbox_files():
+    token = get_dropbox_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.post(
+        "https://api.dropboxapi.com/2/files/list_folder",
+        headers=headers,
+        json={"path": ""}
+    )
+    return jsonify(response.json())
 
-    # 既存ファイルを取得（存在しない場合は空文字）
+# === LINE API ===
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+
+def send_line_message(message):
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message}]
+    }
+    requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=data)
+
+@app.route("/line-hook", methods=["POST"])
+def line_webhook():
+    payload = request.json
     try:
-        _, res = dbx.files_download(DROPBOX_PATH)
-        existing = res.content.decode("utf-8")
-    except dropbox.exceptions.ApiError:
-        existing = ""
+        text = payload["events"][0]["message"]["text"]
+        reply_token = payload["events"][0]["replyToken"]
+        reply(text, reply_token)
+    except Exception as e:
+        print(f"Error in webhook: {e}")
+    return "ok"
 
-    # 新しいログを追加してアップロード
-    new_log = existing + f"{datetime.now().isoformat()} - {text}\n"
-    dbx.files_upload(new_log.encode("utf-8"), DROPBOX_PATH, mode=dropbox.files.WriteMode.overwrite)
+def reply(text, reply_token):
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "replyToken": reply_token,
+        "messages": [{"type": "text", "text": "ありがとうございます"}]
+    }
+    requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, json=data)
 
-# ✅ Dropboxから内容を読み取り
-def read_from_dropbox():
-    access_token = get_access_token()
-    dbx = dropbox.Dropbox(access_token)
+# === GAS 連携（将来の自動トリガー実装用） ===
+@app.route("/run-gas", methods=["POST"])
+def run_gas():
+    # 仮設：ここに GAS API エンドポイント or Apps Script Web API を呼ぶコードを入れる
+    return jsonify({"status": "GAS call triggered (仮)"})
 
-    try:
-        _, res = dbx.files_download(DROPBOX_PATH)
-        return res.content.decode("utf-8")
-    except dropbox.exceptions.ApiError as e:
-        return f"読み込みエラー: {e}"
-
-# ✅ LINEやGPTから送信されたメッセージを保存
-@app.route("/gpt", methods=["POST"])
-def handle_message():
-    data = request.get_json()
-    message = data.get("message", "")
-    append_to_dropbox(message)
-    return jsonify({"status": "saved"}), 200
-
-# ✅ Dropboxのログを取得（読み取り確認用）
-@app.route("/logs", methods=["GET"])
-def get_logs():
-    content = read_from_dropbox()
-    return content, 200
-
-# ✅ Dropbox Webhook受信用（デバッグログ確認などに）
-@app.route("/dropbox_webhook", methods=["POST", "GET"])
-def dropbox_webhook():
-    if request.method == "GET":
-        return request.args.get("challenge", "")
-    elif request.method == "POST":
-        print("🔔 Dropbox webhook triggered!")
-        return "OK", 200
-
-# ✅ 動作確認用のルート
+# === テスト用 ===
 @app.route("/", methods=["GET"])
 def home():
-    return "Yatagarasu BOT is running", 200
+    return "✅ AI統合サーバー稼働中"
+
+if __name__ == "__main__":
+    app.run(debug=True)
