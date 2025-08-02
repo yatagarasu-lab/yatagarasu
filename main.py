@@ -10,6 +10,21 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
+# === Google 認証JSONを環境変数から書き出し ===
+def setup_google_credentials():
+    b64 = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_BASE64")
+    if b64:
+        json_data = base64.b64decode(b64)
+        cred_path = "/tmp/credentials.json"
+        with open(cred_path, "wb") as f:
+            f.write(json_data)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+        print("✅ Google 認証JSONロード完了")
+    else:
+        print("⚠️ GOOGLE_APPLICATION_CREDENTIALS_BASE64 が未設定")
+
+setup_google_credentials()
+
 # === Dropbox API（リフレッシュトークン方式） ===
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
