@@ -1,21 +1,20 @@
 from flask import Flask, request, jsonify
 import dropbox
 import os
-import hashlib
 from datetime import datetime
 import requests
 
 app = Flask(__name__)
 
-# ✅ Dropbox環境変数
+# ✅ Dropbox 環境変数（Renderなどで設定済みであること）
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 
-# ✅ Full Dropbox構成用のパス
+# ✅ Full Dropbox構成用（ルート直下）
 DROPBOX_PATH = "/gpt_log.txt"
 
-# 🔁 アクセストークンをリフレッシュで取得
+# 🔁 Dropbox アクセストークン取得（refresh_tokenから）
 def get_access_token():
     url = "https://api.dropbox.com/oauth2/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -28,44 +27,34 @@ def get_access_token():
     res = requests.post(url, headers=headers, data=data)
     return res.json()["access_token"]
 
-# 📁 フォルダがなければ作成
-def ensure_folder_exists(dbx, folder_path):
-    try:
-        dbx.files_get_metadata(folder_path)
-    except dropbox.exceptions.ApiError:
-        dbx.files_create_folder_v2(folder_path)
-
-# 📥 Dropboxにテキストを追記保存
+# 📥 Dropbox に内容を追記保存
 def upload_to_dropbox(content):
     access_token = get_access_token()
     dbx = dropbox.Dropbox(oauth2_access_token=access_token)
-
-    # フォルダ確認
-    ensure_folder_exists(dbx, FOLDER_PATH)
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {content}\n".encode("utf-8")
 
     try:
-        metadata, res = dbx.files_download(FILE_PATH)
+        metadata, res = dbx.files_download(DROPBOX_PATH)
         existing = res.content + line
     except dropbox.exceptions.ApiError:
-        existing = line
+        existing = line  # 初回ファイルがない場合
 
-    dbx.files_upload(existing, FILE_PATH, mode=dropbox.files.WriteMode.overwrite)
+    dbx.files_upload(existing, DROPBOX_PATH, mode=dropbox.files.WriteMode.overwrite)
 
-# 📤 Dropboxからログを取得
+# 📤 Dropbox の内容を取得
 def read_from_dropbox():
     access_token = get_access_token()
     dbx = dropbox.Dropbox(oauth2_access_token=access_token)
 
     try:
-        metadata, res = dbx.files_download(FILE_PATH)
+        metadata, res = dbx.files_download(DROPBOX_PATH)
         return res.content.decode("utf-8")
     except dropbox.exceptions.ApiError:
         return "まだ記録がありません。"
 
-# ✅ GPTからのログを保存
+# ✅ GPTメッセージ受信 → Dropboxへ記録
 @app.route("/gpt", methods=["POST"])
 def gpt_log():
     data = request.json
@@ -76,26 +65,26 @@ def gpt_log():
     upload_to_dropbox(message)
     return jsonify({"status": "保存完了", "message": message})
 
-# ✅ ログを表示
+# ✅ 記録されたログを表示
 @app.route("/logs", methods=["GET"])
 def get_logs():
     content = read_from_dropbox()
     return f"<pre>{content}</pre>"
 
-# ✅ Dropbox Webhook受信エンドポイント
+# ✅ Dropbox Webhook エンドポイント
 @app.route("/dropbox_webhook", methods=["GET", "POST"])
 def dropbox_webhook():
     if request.method == "GET":
         return request.args.get("challenge", "")
     if request.method == "POST":
-        print("📩 Dropbox webhook通知受信:", request.get_json())
+        print("Dropbox webhook通知受信:", request.get_json())
         return "", 200
 
-# ✅ 起動確認用
+# ✅ 動作確認用トップページ
 @app.route("/", methods=["GET"])
 def index():
-    return "📦 GPT Dropbox Logger Running (Full Dropbox Mode)"
+    return "📦 GPT Dropbox Logger Running"
 
-# 🔄 起動
+# ✅ ローカル実行用（Renderでは不要）
 if __name__ == "__main__":
     app.run(debug=True)
