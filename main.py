@@ -13,8 +13,7 @@ DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 
 # ✅ Full Dropbox構成用のパス
-FOLDER_PATH = "/slot-data-analyzer"
-FILE_PATH = f"{FOLDER_PATH}/gpt_log.txt"
+DROPBOX_PATH = "/gpt_log.txt"
 
 # 🔁 アクセストークンをリフレッシュで取得
 def get_access_token():
