@@ -2,3 +2,4 @@ flask
 requests
 openai
 line-bot-sdk
+gunicorn
