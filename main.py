@@ -71,6 +71,20 @@ def send_line_message(message):
 # === Webhook通知制限 ===
 last_notification_time = None
 
+# === Google Sheets連携 ===
+GOOGLE_SHEET_WEBHOOK_URL = os.getenv("GOOGLE_SHEET_WEBHOOK_URL")
+
+def send_to_spreadsheet(source, message):
+    payload = {
+        "source": source,
+        "message": message
+    }
+    try:
+        response = requests.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload)
+        print(f"✅ スプレッドシート送信結果: {response.text}")
+    except Exception as e:
+        print(f"❌ スプレッドシート送信失敗: {e}")
+
 # === Dropbox Webhook ===
 @app.route("/webhook", methods=["GET", "POST"])
 def dropbox_webhook():
@@ -122,7 +136,7 @@ def reply_to_line(reply_token, message):
     except Exception as e:
         print(f"❌ LINE返信失敗: {e}")
 
-# === GPT + Google Cloud Vision API 統合 ===
+# === GPT + Vision統合画像解析 ===
 def analyze_image_with_vision_and_gpt(image_bytes):
     try:
         client = vision.ImageAnnotatorClient()
@@ -150,35 +164,6 @@ def analyze_image_with_vision_and_gpt(image_bytes):
     except Exception as e:
         print(f"❌ Vision+GPT解析失敗: {e}")
         return "解析失敗しました"
-
-# === Google Vision API で文字検出（TEXT_DETECTION）===
-def analyze_image_with_vision_api(image_content):
-    try:
-        api_key = os.getenv("GOOGLE_CLOUD_VISION_KEY")
-        url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
-
-        request_body = {
-            "requests": [
-                {
-                    "image": {"content": base64.b64encode(image_content).decode("utf-8")},
-                    "features": [{"type": "TEXT_DETECTION"}]
-                }
-            ]
-        }
-
-        res = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(request_body))
-        res.raise_for_status()
-        annotations = res.json()["responses"][0].get("textAnnotations", [])
-        if annotations:
-            detected_text = annotations[0]["description"]
-            print("✅ Vision API テキスト解析成功")
-            return detected_text
-        else:
-            print("⚠️ テキスト検出なし")
-            return "テキストが検出されませんでした。"
-    except Exception as e:
-        print(f"❌ Vision APIエラー: {e}")
-        return "画像解析に失敗しました。"
 
 # === Dropboxから最新画像を取得 ===
 def get_latest_dropbox_image():
@@ -217,7 +202,7 @@ def get_latest_dropbox_image():
     except Exception as e:
         return None, f"Dropboxからの画像取得失敗: {e}"
 
-# === Vision + GPT 処理メイン関数 ===
+# === 画像解析メイン処理 ===
 def process_latest_dropbox_image():
     image_data, err = get_latest_dropbox_image()
     if err:
@@ -226,24 +211,13 @@ def process_latest_dropbox_image():
 
     summary = analyze_image_with_vision_and_gpt(image_data)
     send_line_message(f"📸 画像解析結果:\n\n{summary}")
+    send_to_spreadsheet("Dropbox", summary)
 
-# === テスト用：Vision単体で文字検出して通知 ===
-@app.route("/run-vision-test", methods=["GET"])
-def run_vision_test():
-    image_data, err = get_latest_dropbox_image()
-    if err:
-        send_line_message(f"❌ Visionテスト失敗: {err}")
-        return jsonify({"error": err}), 500
-
-    text = analyze_image_with_vision_api(image_data)
-    send_line_message(f"🧠 Vision解析結果:\n{text}")
-    return jsonify({"text": text})
-
-# === 動作チェック用ルート ===
+# === 簡易起動確認 ===
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ AI統合サーバー稼働中"
+    return "✅ AI統合サーバー起動中"
 
-# === Flask起動 ===
+# === Flask 起動 ===
 if __name__ == "__main__":
     app.run(debug=True)
