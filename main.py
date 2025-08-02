@@ -32,3 +32,16 @@ def transfer_dropbox_to_gdrive():
                 gfile.Upload()
     except Exception as e:
         print("転送エラー:", str(e))
+        import dropbox
+import datetime
+import os
+
+def save_gpt_output_to_dropbox(content: str, filename_prefix="gpt_log"):
+    try:
+        dbx = dropbox.Dropbox(os.getenv("DROPBOX_ACCESS_TOKEN"))
+        now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"/Apps/slot-data-analyzer/{filename_prefix}_{now}.txt"
+        dbx.files_upload(content.encode(), filename, mode=dropbox.files.WriteMode.overwrite)
+        print(f"✅ 保存完了: {filename}")
+    except Exception as e:
+        print(f"❌ 保存エラー: {e}")
