@@ -3,6 +3,7 @@ import requests
 import json
 import os
 import io
+import base64
 from datetime import datetime, timedelta
 from google.cloud import vision
 from openai import OpenAI
@@ -32,43 +33,6 @@ def get_dropbox_access_token():
         print(f"❌ Dropbox アクセストークン取得失敗: {e}")
         return None
 
-@app.route("/dropbox-files", methods=["GET"])
-def list_dropbox_files():
-    token = get_dropbox_access_token()
-    if not token:
-        return jsonify({"error": "Dropbox access token error"}), 500
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.post(
-        "https://api.dropboxapi.com/2/files/list_folder",
-        headers=headers,
-        json={"path": ""}
-    )
-    return jsonify(response.json())
-
-# === 通知のスパム防止用 ===
-last_notification_time = None
-
-# === Dropbox Webhook エンドポイント ===
-@app.route("/webhook", methods=["GET", "POST"])
-def dropbox_webhook():
-    global last_notification_time
-
-    if request.method == "GET":
-        challenge = request.args.get("challenge")
-        print(f"✅ Dropbox webhook チャレンジ応答: {challenge}")
-        return challenge, 200
-
-    elif request.method == "POST":
-        now = datetime.now()
-        if last_notification_time and now - last_notification_time < timedelta(minutes=2):
-            print("⏳ 通知スキップ（2分以内の連続）")
-            return "", 200
-
-        last_notification_time = now
-        print("📦 Dropbox Webhook POST 受信しました → 処理開始")
-        process_latest_dropbox_image()
-        return "", 200
-
 # === LINE API ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
@@ -89,6 +53,31 @@ def send_line_message(message):
     except Exception as e:
         print(f"❌ LINE通知失敗: {e}")
 
+# === Webhook通知制限 ===
+last_notification_time = None
+
+# === Dropbox Webhook ===
+@app.route("/webhook", methods=["GET", "POST"])
+def dropbox_webhook():
+    global last_notification_time
+
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        print(f"✅ Dropbox webhook チャレンジ応答: {challenge}")
+        return challenge, 200
+
+    elif request.method == "POST":
+        now = datetime.now()
+        if last_notification_time and now - last_notification_time < timedelta(minutes=2):
+            print("⏳ 通知スキップ（2分以内の連続）")
+            return "", 200
+
+        last_notification_time = now
+        print("📦 Dropbox Webhook POST 受信 → 処理開始")
+        process_latest_dropbox_image()
+        return "", 200
+
+# === LINE Webhook（返信テスト用） ===
 @app.route("/line-webhook", methods=["POST"])
 def line_webhook():
     payload = request.json
@@ -96,7 +85,6 @@ def line_webhook():
         events = payload.get("events", [])
         for event in events:
             if event.get("type") == "message" and event["message"].get("type") == "text":
-                user_message = event["message"]["text"]
                 reply_token = event["replyToken"]
                 reply_to_line(reply_token, "ありがとうございます")
         print("✅ LINE Webhook 正常受信")
@@ -119,14 +107,7 @@ def reply_to_line(reply_token, message):
     except Exception as e:
         print(f"❌ LINE返信失敗: {e}")
 
-# === GAS連携（仮） ===
-@app.route("/run-gas", methods=["POST"])
-def run_gas():
-    print("✅ GAS起動（仮）")
-    return jsonify({"status": "GAS call triggered (仮)"})
-
-
-# === Vision + GPT で画像解析 ===
+# === GPT + Google Cloud Vision API 統合 ===
 def analyze_image_with_vision_and_gpt(image_bytes):
     try:
         client = vision.ImageAnnotatorClient()
@@ -137,13 +118,13 @@ def analyze_image_with_vision_and_gpt(image_bytes):
         label_texts = [label.description for label in labels]
 
         label_summary = ", ".join(label_texts)
-        prompt = f"この画像は次のような内容が含まれています: {label_summary}。この内容について要約してください。"
+        prompt = f"この画像には次のような要素が含まれています: {label_summary}。この内容を要約してください。"
 
         openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         gpt_response = openai.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたは画像内容を要約するAIです。"},
+                {"role": "system", "content": "あなたは画像の内容を要約するAIです。"},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -155,56 +136,7 @@ def analyze_image_with_vision_and_gpt(image_bytes):
         print(f"❌ Vision+GPT解析失敗: {e}")
         return "解析失敗しました"
 
-# === Dropboxから最新画像を取得して解析 ===
-def process_latest_dropbox_image():
-    token = get_dropbox_access_token()
-    if not token:
-        send_line_message("❌ Dropbox アクセストークン取得失敗")
-        return
-
-    try:
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        list_res = requests.post(
-            "https://api.dropboxapi.com/2/files/list_folder",
-            headers=headers,
-            json={"path": "/Apps/slot-data-analyzer", "recursive": False}
-        )
-        entries = list_res.json().get("entries", [])
-        image_files = [f for f in entries if f[".tag"] == "file" and f["name"].lower().endswith((".jpg", ".jpeg", ".png"))]
-        if not image_files:
-            send_line_message("📂 新しい画像ファイルが見つかりませんでした。")
-            return
-
-        latest = sorted(image_files, key=lambda f: f["client_modified"], reverse=True)[0]
-        path = latest["path_display"]
-
-        # ダウンロード
-        download_res = requests.post(
-            "https://content.dropboxapi.com/2/files/download",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Dropbox-API-Arg": json.dumps({"path": path})
-            }
-        )
-
-        image_bytes = download_res.content
-        summary = analyze_image_with_vision_and_gpt(image_bytes)
-        send_line_message(f"📸 画像解析結果:\n\n{summary}")
-
-    except Exception as e:
-        print(f"❌ 最新画像の処理失敗: {e}")
-        send_line_message("❌ 画像処理中にエラーが発生しました")
-
-# === テスト用（Renderの稼働チェック） ===
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ AI統合サーバー稼働中"
-
-# === 起動 ===
-if __name__ == "__main__":
-    app.run(debug=True)
-    import base64
-
+# === Google Vision API で文字検出（TEXT_DETECTION）===
 def analyze_image_with_vision_api(image_content):
     try:
         api_key = os.getenv("GOOGLE_CLOUD_VISION_KEY")
@@ -224,15 +156,16 @@ def analyze_image_with_vision_api(image_content):
         annotations = res.json()["responses"][0].get("textAnnotations", [])
         if annotations:
             detected_text = annotations[0]["description"]
-            print("✅ Vision API 解析成功")
+            print("✅ Vision API テキスト解析成功")
             return detected_text
         else:
-            print("⚠️ Vision API: テキスト検出なし")
+            print("⚠️ テキスト検出なし")
             return "テキストが検出されませんでした。"
     except Exception as e:
         print(f"❌ Vision APIエラー: {e}")
         return "画像解析に失敗しました。"
 
+# === Dropboxから最新画像を取得 ===
 def get_latest_dropbox_image():
     try:
         token = get_dropbox_access_token()
@@ -266,7 +199,17 @@ def get_latest_dropbox_image():
     except Exception as e:
         return None, f"Dropboxからの画像取得失敗: {e}"
 
-# GAS仮エンドポイントの中身を画像解析に変更してテスト用に利用
+# === Vision + GPT 処理メイン関数 ===
+def process_latest_dropbox_image():
+    image_data, err = get_latest_dropbox_image()
+    if err:
+        send_line_message(f"❌ 画像取得失敗: {err}")
+        return
+
+    summary = analyze_image_with_vision_and_gpt(image_data)
+    send_line_message(f"📸 画像解析結果:\n\n{summary}")
+
+# === テスト用：Vision単体で文字検出して通知 ===
 @app.route("/run-vision-test", methods=["GET"])
 def run_vision_test():
     image_data, err = get_latest_dropbox_image()
@@ -277,3 +220,12 @@ def run_vision_test():
     text = analyze_image_with_vision_api(image_data)
     send_line_message(f"🧠 Vision解析結果:\n{text}")
     return jsonify({"text": text})
+
+# === 動作チェック用ルート ===
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ AI統合サーバー稼働中"
+
+# === Flask起動 ===
+if __name__ == "__main__":
+    app.run(debug=True)
