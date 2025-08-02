@@ -1,28 +1,34 @@
-# main Flask entry point (to be populated below)
-import os
+# --- Dropbox to GoogleDrive Task ---
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
 import dropbox
+import os
+import io
 
-# Dropboxのアクセストークン（RenderやReplitでは環境変数で設定）
-DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-
-def load_project_memory():
-    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-    file_path = "/Apps/slot-data-analyzer/プロジェクト指示書.txt"  # 保存場所に合わせて修正OK
-
+def transfer_dropbox_to_gdrive():
     try:
-        metadata, res = dbx.files_download(file_path)
-        content = res.content.decode("utf-8")
-        print("✅ プロジェクト記憶を読み込みました：\n", content)
-        return content
+        # Dropbox 認証
+        dbx = dropbox.Dropbox(os.getenv("DROPBOX_ACCESS_TOKEN"))
+        dropbox_path = "/Apps/slot-data-analyzer"
+        entries = dbx.files_list_folder(dropbox_path).entries
+
+        # Google Drive 認証
+        gauth = GoogleAuth()
+        gauth.LocalWebserverAuth()
+        drive = GoogleDrive(gauth)
+
+        for entry in entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                file_path = entry.path_display
+                _, ext = os.path.splitext(file_path)
+                _, res = dbx.files_download(file_path)
+                content = res.content
+
+                gfile = drive.CreateFile({'title': os.path.basename(file_path)})
+                if ext in ['.txt', '.csv', '.json']:
+                    gfile.SetContentString(content.decode())
+                else:
+                    gfile.SetContentString("バイナリファイル（省略）")
+                gfile.Upload()
     except Exception as e:
-        print("❌ 指示書の読み込みに失敗:", e)
-        return None
-
-def main():
-    memory = load_project_memory()
-    if memory:
-        # この部分に後でタスク振り分けなど追加していく
-        pass
-
-if __name__ == "__main__":
-    main()
+        print("転送エラー:", str(e))
