@@ -1,57 +1,49 @@
-import os
 from flask import Flask, request
-import dropbox
 from datetime import datetime
+import openai
+import os
+
+from dropbox_client import upload_to_dropbox, read_from_dropbox  # ← 別ファイルで定義済み
 
 app = Flask(__name__)
 
-# Dropbox 認証情報（Render の環境変数から取得）
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")  # ※リフレッシュトークン方式にする場合は後述
+# GPTの応答処理
+@app.route("/gpt", methods=["POST"])
+def chat():
+    user_input = request.json.get("message", "")
+    if not user_input:
+        return {"error": "message is required"}, 400
 
-# ログファイルのパス
-LOG_FILE = "gpt_log.txt"
+    # GPT応答
+    openai.api_key = os.environ["OPENAI_API_KEY"]
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "user", "content": user_input}
+        ]
+    )
+    gpt_response = response.choices[0].message["content"]
 
-# Dropbox にアップロードするパス
-DROPBOX_UPLOAD_PATH = "/gpt_log.txt"
+    # ログをローカルファイルに保存
+    log_entry = f"{datetime.now()} - {user_input} → {gpt_response}\n"
+    with open("gpt_log.txt", "a", encoding="utf-8") as f:
+        f.write(log_entry)
 
+    # Dropboxにアップロード
+    upload_to_dropbox("gpt_log.txt", "/GPTログ/gpt_log.txt")
 
-def write_gpt_log(content: str):
-    """ローカルにログを追記し、Dropboxにアップロード"""
-    # ファイルがなければ作成
-    if not os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            f.write("")
+    return {"response": gpt_response}
 
-    # ログを追記
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-        f.write(f"{timestamp} {content}\n")
+# ログをDropboxから読み込んで返す（確認用）
+@app.route("/logs", methods=["GET"])
+def logs():
+    content = read_from_dropbox("/GPTログ/gpt_log.txt")
+    return {"logs": content}
 
-    # Dropbox にアップロード
-    upload_to_dropbox(LOG_FILE, DROPBOX_UPLOAD_PATH)
-
-
-def upload_to_dropbox(local_path: str, dropbox_path: str):
-    """Dropboxへファイルをアップロード"""
-    if not DROPBOX_ACCESS_TOKEN:
-        print("Dropbox アクセストークンが設定されていません")
-        return
-
-    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-    with open(local_path, "rb") as f:
-        dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
-        print(f"✅ Dropbox にアップロードしました: {dropbox_path}")
-
-
-@app.route("/", methods=["GET", "POST"])
-def index():
-    if request.method == "POST":
-        content = request.json.get("message", "（内容なし）")
-        write_gpt_log(content)
-        return {"status": "success", "message": "GPTログを記録＆Dropboxに保存しました"}
-
-    return "GPTログ記録システムは動作中です（GET）"
-
+# 簡単なヘルスチェック
+@app.route("/", methods=["GET"])
+def root():
+    return "GPT Logging Bot is live!"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
