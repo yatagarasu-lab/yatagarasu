@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -41,19 +42,29 @@ def list_dropbox_files():
     )
     return jsonify(response.json())
 
+# === 通知のスパム防止用 ===
+last_notification_time = None
 
 # === Dropbox Webhook エンドポイント ===
 @app.route("/webhook", methods=["GET", "POST"])
 def dropbox_webhook():
+    global last_notification_time
+
     if request.method == "GET":
         challenge = request.args.get("challenge")
         print(f"✅ Dropbox webhook チャレンジ応答: {challenge}")
         return challenge, 200
+
     elif request.method == "POST":
-        print("📦 Dropbox Webhook POST 受信しました")
+        now = datetime.now()
+        if last_notification_time and now - last_notification_time < timedelta(minutes=2):
+            print("⏳ 通知スキップ（2分以内の連続）")
+            return "", 200
+
+        last_notification_time = now
+        print("📦 Dropbox Webhook POST 受信しました → 通知送信")
         send_line_message("📦 Dropbox にファイルが追加または変更されました")
         return "", 200
-
 
 # === LINE API ===
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -104,7 +115,6 @@ def reply_to_line(reply_token, message):
         print("✅ LINE返信 成功")
     except Exception as e:
         print(f"❌ LINE返信失敗: {e}")
-
 
 # === GAS連携（仮） ===
 @app.route("/run-gas", methods=["POST"])
