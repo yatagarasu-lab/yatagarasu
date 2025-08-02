@@ -5,3 +5,4 @@ line-bot-sdk
 gunicorn
 PyGithub
 dropbox
+google-cloud-vision
