@@ -2,7 +2,10 @@ from flask import Flask, request, jsonify
 import requests
 import json
 import os
+import io
 from datetime import datetime, timedelta
+from google.cloud import vision
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -62,8 +65,8 @@ def dropbox_webhook():
             return "", 200
 
         last_notification_time = now
-        print("📦 Dropbox Webhook POST 受信しました → 通知送信")
-        send_line_message("📦 Dropbox にファイルが追加または変更されました")
+        print("📦 Dropbox Webhook POST 受信しました → 処理開始")
+        process_latest_dropbox_image()
         return "", 200
 
 # === LINE API ===
@@ -123,11 +126,79 @@ def run_gas():
     return jsonify({"status": "GAS call triggered (仮)"})
 
 
+# === Vision + GPT で画像解析 ===
+def analyze_image_with_vision_and_gpt(image_bytes):
+    try:
+        client = vision.ImageAnnotatorClient()
+        image = vision.Image(content=image_bytes)
+
+        response = client.label_detection(image=image)
+        labels = response.label_annotations
+        label_texts = [label.description for label in labels]
+
+        label_summary = ", ".join(label_texts)
+        prompt = f"この画像は次のような内容が含まれています: {label_summary}。この内容について要約してください。"
+
+        openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        gpt_response = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "あなたは画像内容を要約するAIです。"},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        summary = gpt_response.choices[0].message.content
+        print("✅ GPT画像要約成功")
+        return summary
+
+    except Exception as e:
+        print(f"❌ Vision+GPT解析失敗: {e}")
+        return "解析失敗しました"
+
+# === Dropboxから最新画像を取得して解析 ===
+def process_latest_dropbox_image():
+    token = get_dropbox_access_token()
+    if not token:
+        send_line_message("❌ Dropbox アクセストークン取得失敗")
+        return
+
+    try:
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        list_res = requests.post(
+            "https://api.dropboxapi.com/2/files/list_folder",
+            headers=headers,
+            json={"path": "/Apps/slot-data-analyzer", "recursive": False}
+        )
+        entries = list_res.json().get("entries", [])
+        image_files = [f for f in entries if f[".tag"] == "file" and f["name"].lower().endswith((".jpg", ".jpeg", ".png"))]
+        if not image_files:
+            send_line_message("📂 新しい画像ファイルが見つかりませんでした。")
+            return
+
+        latest = sorted(image_files, key=lambda f: f["client_modified"], reverse=True)[0]
+        path = latest["path_display"]
+
+        # ダウンロード
+        download_res = requests.post(
+            "https://content.dropboxapi.com/2/files/download",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Dropbox-API-Arg": json.dumps({"path": path})
+            }
+        )
+
+        image_bytes = download_res.content
+        summary = analyze_image_with_vision_and_gpt(image_bytes)
+        send_line_message(f"📸 画像解析結果:\n\n{summary}")
+
+    except Exception as e:
+        print(f"❌ 最新画像の処理失敗: {e}")
+        send_line_message("❌ 画像処理中にエラーが発生しました")
+
 # === テスト用（Renderの稼働チェック） ===
 @app.route("/", methods=["GET"])
 def home():
     return "✅ AI統合サーバー稼働中"
-
 
 # === 起動 ===
 if __name__ == "__main__":
