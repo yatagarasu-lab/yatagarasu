@@ -176,13 +176,13 @@ def get_latest_dropbox_image():
         list_res = requests.post(
             "https://api.dropboxapi.com/2/files/list_folder",
             headers=headers,
-            json={"path": "", "recursive": False}
+            json={"path": "", "recursive": False}  # ✅ Full Dropbox対応
         )
         list_res.raise_for_status()
         entries = list_res.json().get("entries", [])
         image_entries = [
             f for f in entries
-            if f[".tag"] == "file" and f["name"].lower().endswith((".jpg", ".jpeg", ".png"))
+            if f.get(".tag") == "file" and f["name"].lower().endswith((".jpg", ".jpeg", ".png"))
         ]
         if not image_entries:
             return None, "画像ファイルが見つかりませんでした"
