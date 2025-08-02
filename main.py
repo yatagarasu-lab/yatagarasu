@@ -203,3 +203,77 @@ def home():
 # === 起動 ===
 if __name__ == "__main__":
     app.run(debug=True)
+    import base64
+
+def analyze_image_with_vision_api(image_content):
+    try:
+        api_key = os.getenv("GOOGLE_CLOUD_VISION_KEY")
+        url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+
+        request_body = {
+            "requests": [
+                {
+                    "image": {"content": base64.b64encode(image_content).decode("utf-8")},
+                    "features": [{"type": "TEXT_DETECTION"}]
+                }
+            ]
+        }
+
+        res = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(request_body))
+        res.raise_for_status()
+        annotations = res.json()["responses"][0].get("textAnnotations", [])
+        if annotations:
+            detected_text = annotations[0]["description"]
+            print("✅ Vision API 解析成功")
+            return detected_text
+        else:
+            print("⚠️ Vision API: テキスト検出なし")
+            return "テキストが検出されませんでした。"
+    except Exception as e:
+        print(f"❌ Vision APIエラー: {e}")
+        return "画像解析に失敗しました。"
+
+def get_latest_dropbox_image():
+    try:
+        token = get_dropbox_access_token()
+        if not token:
+            return None, "Dropboxアクセストークン取得失敗"
+
+        headers = {"Authorization": f"Bearer {token}"}
+        list_res = requests.post(
+            "https://api.dropboxapi.com/2/files/list_folder",
+            headers=headers,
+            json={"path": "/Apps/slot-data-analyzer", "recursive": False}
+        )
+        list_res.raise_for_status()
+        entries = list_res.json().get("entries", [])
+        image_entries = [f for f in entries if f[".tag"] == "file" and f["name"].lower().endswith((".jpg", ".jpeg", ".png"))]
+        if not image_entries:
+            return None, "画像ファイルが見つかりませんでした"
+
+        latest = sorted(image_entries, key=lambda x: x["server_modified"], reverse=True)[0]
+        path = latest["path_lower"]
+
+        download_res = requests.post(
+            "https://content.dropboxapi.com/2/files/download",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Dropbox-API-Arg": json.dumps({"path": path})
+            }
+        )
+        download_res.raise_for_status()
+        return download_res.content, None
+    except Exception as e:
+        return None, f"Dropboxからの画像取得失敗: {e}"
+
+# GAS仮エンドポイントの中身を画像解析に変更してテスト用に利用
+@app.route("/run-vision-test", methods=["GET"])
+def run_vision_test():
+    image_data, err = get_latest_dropbox_image()
+    if err:
+        send_line_message(f"❌ Visionテスト失敗: {err}")
+        return jsonify({"error": err}), 500
+
+    text = analyze_image_with_vision_api(image_data)
+    send_line_message(f"🧠 Vision解析結果:\n{text}")
+    return jsonify({"text": text})
