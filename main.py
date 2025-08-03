@@ -50,7 +50,7 @@ def download_file(path):
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
-# 重複ファイル検出＆削除
+# 重複ファイル検出
 def find_duplicates(files):
     hash_map = {}
     duplicates = []
@@ -114,10 +114,10 @@ def send_to_spreadsheet(source, message):
     except Exception as e:
         print(f"❌ GAS送信エラー: {e}")
 
-# Webhookエンドポイント
-@app.route("/", methods=["POST"])
+# Webhook用のエンドポイント（LINE/Dropbox連携用）
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    print("✅ Webhook受信")
+    print("✅ /webhook 受信")
     files = list_files()
     duplicates = find_duplicates(files)
 
@@ -138,7 +138,7 @@ def webhook():
 
     return jsonify({"status": "success"})
 
-# 動作確認用
+# 動作確認用エンドポイント（ブラウザアクセス確認用）
 @app.route("/", methods=["GET"])
 def index():
     return "📡 Yatagarasu GPT Automation is running."
