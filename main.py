@@ -10,14 +10,14 @@ import requests
 
 app = Flask(__name__)
 
-# 環境変数の読み込み
-DROPBOX_REFRESH_TOKEN = os.environ["DROPBOX_REFRESH_TOKEN"]
-DROPBOX_CLIENT_ID = os.environ["DROPBOX_CLIENT_ID"]
-DROPBOX_CLIENT_SECRET = os.environ["DROPBOX_CLIENT_SECRET"]
-LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-LINE_USER_ID = os.environ["LINE_USER_ID"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-GAS_WEBHOOK_URL = os.environ["GAS_WEBHOOK_URL"]
+# 環境変数の読み込み（エラーを防ぐため os.getenv）
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
+DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GAS_WEBHOOK_URL = os.getenv("GAS_WEBHOOK_URL")
 
 # OpenAI 初期化
 openai.api_key = OPENAI_API_KEY
@@ -66,28 +66,33 @@ def find_duplicates(files):
 
 # GPTで要約処理（画像・テキスト両対応）
 def summarize_file(file_path):
-    content = download_file(file_path)
-    if file_path.lower().endswith((".jpg", ".jpeg", ".png")):
-        base64_img = base64.b64encode(content).decode("utf-8")
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}},
-                    {"type": "text", "text": "この画像を要約してください。"}
-                ]}
-            ]
-        )
-        return response.choices[0].message.content
-    else:
-        text = content.decode("utf-8", errors="ignore")
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "user", "content": f"以下を要約してください:\n{text}"}
-            ]
-        )
-        return response.choices[0].message.content
+    try:
+        content = download_file(file_path)
+        if file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            base64_img = base64.b64encode(content).decode("utf-8")
+            response = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}},
+                        {"type": "text", "text": "この画像を要約してください。"}
+                    ]}
+                ]
+            )
+            return response.choices[0].message.content
+        elif file_path.lower().endswith((".txt", ".csv", ".log", ".json")):
+            text = content.decode("utf-8", errors="ignore")
+            response = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "user", "content": f"以下を要約してください:\n{text}"}
+                ]
+            )
+            return response.choices[0].message.content
+        else:
+            return "対応していないファイル形式です。"
+    except Exception as e:
+        return f"要約失敗: {str(e)}"
 
 # LINEに通知
 def send_line_notify(message):
@@ -100,7 +105,8 @@ def send_line_notify(message):
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": message}]
     }
-    requests.post(url, headers=headers, json=payload)
+    res = requests.post(url, headers=headers, json=payload)
+    print(f"📬 LINE通知: {res.status_code} / {res.text}")
 
 # GASへ送信
 def send_to_spreadsheet(source, message):
@@ -110,35 +116,56 @@ def send_to_spreadsheet(source, message):
     }
     try:
         response = requests.post(GAS_WEBHOOK_URL, json=payload)
-        print(f"📤 GAS送信結果: {response.text}")
+        print(f"📤 GAS送信結果: {response.status_code} / {response.text}")
     except Exception as e:
-        print(f"❌ GAS送信エラー: {e}")
+        print(f"❌ GAS送信エラー: {source} / {e}")
 
-# Webhook用のエンドポイント（LINE/Dropbox連携用）
+# Webhook（LINE + Dropbox 共通）
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    print("✅ /webhook 受信")
-    files = list_files()
-    duplicates = find_duplicates(files)
+    user_agent = request.headers.get("User-Agent", "").lower()
+    print(f"📩 Webhook受信: User-Agent={user_agent}")
 
-    for file in files:
-        if isinstance(file, dropbox.files.FileMetadata) and file.path_display not in duplicates:
-            summary = summarize_file(file.path_display)
-            file_name = os.path.basename(file.path_display)
-            message = f"📄ファイル: {file_name}\n📝要約: {summary}"
-            send_line_notify(message)
-            send_to_spreadsheet(file_name, summary)
+    if "line-bot" in user_agent:
+        return handle_line_webhook()
+    elif "dropbox" in user_agent:
+        return handle_dropbox_webhook()
+    else:
+        print("⚠️ 未知のWebhookリクエスト")
+        return "Unknown webhook source", 400
 
-    # 重複削除
-    if duplicates:
-        dbx = dropbox.Dropbox(get_access_token())
-        for dup in duplicates:
-            dbx.files_delete_v2(dup)
-            print(f"🗑️ 重複削除: {dup}")
+# LINE Webhook処理（未実装→今後拡張用）
+def handle_line_webhook():
+    print("🤖 LINE Webhook処理（今後の拡張用）")
+    return "LINE webhook OK", 200
 
-    return jsonify({"status": "success"})
+# Dropbox Webhook処理
+def handle_dropbox_webhook():
+    try:
+        files = list_files()
+        duplicates = find_duplicates(files)
 
-# 動作確認用エンドポイント（ブラウザアクセス確認用）
+        for file in files:
+            if isinstance(file, dropbox.files.FileMetadata) and file.path_display not in duplicates:
+                summary = summarize_file(file.path_display)
+                file_name = os.path.basename(file.path_display)
+                message = f"📄ファイル: {file_name}\n📝要約: {summary}"
+                send_line_notify(message)
+                send_to_spreadsheet(file_name, summary)
+
+        if duplicates:
+            dbx = dropbox.Dropbox(get_access_token())
+            for dup in duplicates:
+                dbx.files_delete_v2(dup)
+                print(f"🗑️ 重複削除: {dup}")
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        print(f"❌ Dropbox処理エラー: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# 動作確認用
 @app.route("/", methods=["GET"])
 def index():
     return "📡 Yatagarasu GPT Automation is running."
