@@ -16,3 +16,9 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(debug=True)
+    from yatagarasu import analyze_latest_file
+
+@app.route("/analyze", methods=["GET"])
+def analyze():
+    result = analyze_latest_file()
+    return result
