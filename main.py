@@ -8,19 +8,26 @@ import base64
 import openai
 import requests
 
+# LINE SDK
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, ImageMessage
+from linebot.exceptions import InvalidSignatureError
+
 app = Flask(__name__)
 
-# 環境変数の読み込み（エラーを防ぐため os.getenv）
+# 環境変数の読み込み
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GAS_WEBHOOK_URL = os.getenv("GAS_WEBHOOK_URL")
 
-# OpenAI 初期化
 openai.api_key = OPENAI_API_KEY
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Dropbox アクセストークン取得
 def get_access_token():
@@ -34,23 +41,20 @@ def get_access_token():
     response = requests.post(token_url, data=payload)
     return response.json().get("access_token")
 
-# Dropboxファイル一覧取得
+# Dropbox ファイル操作
 def list_files():
     dbx = dropbox.Dropbox(get_access_token())
     result = dbx.files_list_folder(path="", recursive=True)
     return result.entries
 
-# ファイル内容ダウンロード
 def download_file(path):
     dbx = dropbox.Dropbox(get_access_token())
     metadata, res = dbx.files_download(path)
     return res.content
 
-# ファイルのハッシュ生成（重複判定用）
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
-# 重複ファイル検出
 def find_duplicates(files):
     hash_map = {}
     duplicates = []
@@ -64,7 +68,7 @@ def find_duplicates(files):
                 hash_map[hash_val] = file.path_display
     return duplicates
 
-# GPTで要約処理（画像・テキスト両対応）
+# GPTによる要約
 def summarize_file(file_path):
     try:
         content = download_file(file_path)
@@ -94,7 +98,7 @@ def summarize_file(file_path):
     except Exception as e:
         return f"要約失敗: {str(e)}"
 
-# LINEに通知
+# LINE通知
 def send_line_notify(message):
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -108,7 +112,7 @@ def send_line_notify(message):
     res = requests.post(url, headers=headers, json=payload)
     print(f"📬 LINE通知: {res.status_code} / {res.text}")
 
-# GASへ送信
+# GAS送信
 def send_to_spreadsheet(source, message):
     payload = {
         "source": source,
@@ -120,9 +124,16 @@ def send_to_spreadsheet(source, message):
     except Exception as e:
         print(f"❌ GAS送信エラー: {source} / {e}")
 
-# Webhook（LINE + Dropbox 共通）
-@app.route("/webhook", methods=["POST"])
+# Webhook統合ルート
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        # Dropbox challenge対応
+        challenge = request.args.get("challenge")
+        if challenge:
+            print(f"✅ Dropbox challenge応答: {challenge}")
+            return challenge, 200
+
     user_agent = request.headers.get("User-Agent", "").lower()
     print(f"📩 Webhook受信: User-Agent={user_agent}")
 
@@ -133,11 +144,6 @@ def webhook():
     else:
         print("⚠️ 未知のWebhookリクエスト")
         return "Unknown webhook source", 400
-
-# LINE Webhook処理（未実装→今後拡張用）
-def handle_line_webhook():
-    print("🤖 LINE Webhook処理（今後の拡張用）")
-    return "LINE webhook OK", 200
 
 # Dropbox Webhook処理
 def handle_dropbox_webhook():
@@ -165,7 +171,56 @@ def handle_dropbox_webhook():
         print(f"❌ Dropbox処理エラー: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# 動作確認用
+# LINE Webhook処理
+def handle_line_webhook():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+        print("✅ LINE Webhook処理成功")
+        return "LINE webhook OK", 200
+    except InvalidSignatureError:
+        print("❌ LINE署名エラー")
+        return "Invalid signature", 400
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_text_message(event):
+    text = event.message.text
+    print(f"📝 LINEテキスト受信: {text}")
+    send_to_spreadsheet("LINE Text", text)
+    send_line_notify(f"🗒️ 受信テキスト: {text}")
+
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    message_id = event.message.id
+    message_content = line_bot_api.get_message_content(message_id)
+
+    img_path = f"/tmp/{message_id}.jpg"
+    with open(img_path, "wb") as f:
+        for chunk in message_content.iter_content():
+            f.write(chunk)
+
+    with open(img_path, "rb") as f:
+        content = f.read()
+
+    base64_img = base64.b64encode(content).decode("utf-8")
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}},
+                    {"type": "text", "text": "この画像の内容を要約してください。"}
+                ]}
+            ]
+        )
+        summary = response.choices[0].message.content
+        send_line_notify(f"🖼️ 画像要約: {summary}")
+        send_to_spreadsheet("LINE Image", summary)
+    except Exception as e:
+        print(f"❌ LINE画像処理エラー: {e}")
+
 @app.route("/", methods=["GET"])
 def index():
     return "📡 Yatagarasu GPT Automation is running."
