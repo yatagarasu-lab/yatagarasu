@@ -1,45 +1,64 @@
 import os
 import dropbox
-from datetime import datetime
+import mimetypes
 from linebot import LineBotApi
-from linebot.models import MessageEvent, ImageMessage, FileMessage
+from linebot.models import TextSendMessage
 
-# 環境変数
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# Dropbox API認証
+DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
+DROPBOX_CLIENT_ID = os.environ.get("DROPBOX_CLIENT_ID")
+DROPBOX_CLIENT_SECRET = os.environ.get("DROPBOX_CLIENT_SECRET")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+def get_dropbox_access_token():
+    from requests import post
 
-# Dropboxアクセストークン取得
-def get_dropbox_client():
-    from services.dropbox_auth import refresh_dropbox_access_token
-    access_token = refresh_dropbox_access_token()
-    return dropbox.Dropbox(oauth2_access_token=access_token)
+    response = post(
+        "https://api.dropboxapi.com/oauth2/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": DROPBOX_REFRESH_TOKEN,
+            "client_id": DROPBOX_CLIENT_ID,
+            "client_secret": DROPBOX_CLIENT_SECRET,
+        }
+    )
 
-# LINEの画像やファイルをDropboxに保存する
-def save_line_content_to_dropbox(event: MessageEvent):
-    message = event.message
-    user_id = event.source.user_id
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    if isinstance(message, ImageMessage):
-        ext = "jpg"
-        filename = f"{timestamp}_img_from_{user_id}.{ext}"
-    elif isinstance(message, FileMessage):
-        ext = message.file_name.split('.')[-1] if '.' in message.file_name else "bin"
-        filename = f"{timestamp}_{message.file_name}"
+    if response.status_code == 200:
+        return response.json()["access_token"]
     else:
-        print("対応していないメッセージ形式です")
-        return
+        raise Exception(f"Failed to refresh Dropbox token: {response.text}")
 
-    # LINEからコンテンツ取得
-    content = line_bot_api.get_message_content(message.id)
-    file_data = content.content
+def save_line_content_to_dropbox(event):
+    line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
+    message_id = event.message.id
+    user_id = event.source.user_id
 
-    # Dropboxへ保存
-    dbx = get_dropbox_client()
-    dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
-    dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-    print(f"✅ 保存完了: {dropbox_path}")
+    try:
+        # ファイル取得
+        content = line_bot_api.get_message_content(message_id)
+        file_data = b"".join(chunk for chunk in content.iter_content())
+
+        # ファイル名と拡張子推定
+        if hasattr(event.message, 'file_name'):
+            filename = event.message.file_name
+        else:
+            filename = f"{message_id}.jpg"  # 画像はjpg想定で保存
+
+        dropbox_path = f"/LINE受信データ/{filename}"
+
+        # Dropboxにアップロード
+        dbx = dropbox.Dropbox(get_dropbox_access_token())
+        dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+
+        # LINEへ返信（固定メッセージ）
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="ありがとうございます")
+        )
+
+    except Exception as e:
+        print(f"エラー: {e}")
+        # 失敗時にユーザーに通知（任意）
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="ファイルの保存に失敗しました")
+        )
