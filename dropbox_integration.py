@@ -1,16 +1,21 @@
 import os
 import dropbox
 import openai
+import requests
 from requests_oauthlib import OAuth2Session
 
-# Dropbox APIキー類
+# Dropbox
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# OpenAI APIキー
+# OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
+
+# LINE
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
 
 def get_dropbox_access_token():
@@ -40,6 +45,23 @@ def analyze_file_with_gpt(file_content: str) -> str:
         return f"[GPT ERROR] {e}"
 
 
+def send_line_message(text: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": text}]
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        print(f"[LINE] Status: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"[LINE ERROR] {e}")
+
+
 def handle_dropbox_webhook():
     access_token = get_dropbox_access_token()
     dbx = dropbox.Dropbox(access_token)
@@ -52,8 +74,12 @@ def handle_dropbox_webhook():
                 content = res.content.decode("utf-8")
 
                 gpt_result = analyze_file_with_gpt(content)
-                print(f"\n=== {entry.name} の解析結果 ===\n{gpt_result}\n====================")
+
+                message = f"✅ {entry.name} の解析結果：\n{gpt_result}"
+                print(message)
+                send_line_message(message)
     except Exception as e:
         print(f"[Dropbox ERROR] {e}")
+        send_line_message(f"[Dropbox ERROR] {e}")
 
     return "OK", 200
