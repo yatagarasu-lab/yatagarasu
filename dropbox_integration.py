@@ -17,15 +17,25 @@ def get_dropbox_access_token():
         "client_secret": DROPBOX_APP_SECRET,
     }
     response = requests.post(token_url, data=data)
-    response.raise_for_status()  # エラーハンドリング
+    response.raise_for_status()
     return response.json()["access_token"]
 
-# DropboxのWebhookイベントを処理
+# DropboxのWebhookイベントを処理（ファイル一覧を取得して表示）
 def handle_dropbox_webhook():
     access_token = get_dropbox_access_token()
     dbx = dropbox.Dropbox(access_token)
-    
-    # 実際の処理（後でファイル処理など追加予定）
-    print("Dropbox webhook handled.")
-    
+
+    try:
+        # Dropboxのルートディレクトリ内のファイルを取得
+        result = dbx.files_list_folder(path="")
+
+        print("=== Dropboxファイル一覧 ===")
+        for entry in result.entries:
+            print(f"- {entry.name}")
+        print("===========================")
+
+    except Exception as e:
+        print(f"エラー: {e}")
+        return "Internal Server Error", 500
+
     return "OK", 200
