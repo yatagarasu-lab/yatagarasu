@@ -1,25 +1,31 @@
-from dropbox_handler import list_files, download_file, file_hash, delete_file
+import hashlib
+from dropbox_auth import get_dropbox_client
 
-def find_and_remove_duplicates(folder_path="/Apps/slot-data-analyzer"):
-    """重複ファイルを検出し、Dropboxから削除する"""
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
+
+def download_file(path):
+    dbx = get_dropbox_client()
+    _, res = dbx.files_download(path)
+    return res.content
+
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+def find_duplicates(folder_path="/Apps/slot-data-analyzer"):
     files = list_files(folder_path)
     hash_map = {}
+    duplicates = []
 
     for file in files:
         path = file.path_display
         content = download_file(path)
-
-        if not content:
-            print(f"⚠️ ダウンロード失敗（スキップ）: {path}")
-            continue
-
-        hash_value = file_hash(content)
-
-        if hash_value in hash_map:
-            print(f"⚠️ 重複ファイル検出: {path}（同一: {hash_map[hash_value]}）")
-            delete_file(path)
+        h = file_hash(content)
+        if h in hash_map:
+            duplicates.append((path, hash_map[h]))
         else:
-            hash_map[hash_value] = path
-
-if __name__ == "__main__":
-    find_and_remove_duplicates()
+            hash_map[h] = path
+    
+    return duplicates
