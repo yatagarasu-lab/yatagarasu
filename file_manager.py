@@ -1,49 +1,20 @@
-import os
-import hashlib
 import dropbox
 from dropbox.files import FileMetadata
+from auth_dropbox import get_dropbox_access_token
 
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-DROPBOX_TARGET_FOLDER = "/Apps/slot-data-analyzer"
+def get_dropbox_client():
+    access_token = get_dropbox_access_token()
+    return dropbox.Dropbox(access_token)
 
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-def list_files(folder_path=DROPBOX_TARGET_FOLDER):
-    entries = []
+def list_files(folder_path="/"):
+    dbx = get_dropbox_client()
     result = dbx.files_list_folder(folder_path)
-    entries.extend(result.entries)
-    while result.has_more:
-        result = dbx.files_list_folder_continue(result.cursor)
-        entries.extend(result.entries)
-    return [entry for entry in entries if isinstance(entry, FileMetadata)]
+    files = [entry for entry in result.entries if isinstance(entry, FileMetadata)]
+    return files
 
-def find_latest_file(files):
-    latest_file = max(files, key=lambda x: x.client_modified)
-    return latest_file
-
-def delete_duplicates(files):
-    hash_map = {}
-    for file in files:
-        path = file.path_display
-        _, res = dbx.files_download(path)
-        content = res.content
-        hash_value = file_hash(content)
-        if hash_value in hash_map:
-            print(f"🗑️ 重複ファイル削除: {path}")
-            dbx.files_delete_v2(path)
-        else:
-            hash_map[hash_value] = path
-
-def organize_dropbox_files():
-    files = list_files()
+def organize_dropbox_files(folder_path="/"):
+    files = list_files(folder_path)
     if not files:
-        print("⚠️ Dropboxにファイルがありません。")
         return None
-
-    delete_duplicates(files)
-    latest_file = find_latest_file(files)
-    print(f"📦 最新ファイル: {latest_file.name}")
-    return latest_file
+    latest = sorted(files, key=lambda f: f.server_modified, reverse=True)[0]
+    return latest
