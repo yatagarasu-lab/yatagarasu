@@ -1,35 +1,19 @@
-import requests
-from dropbox_auth import get_access_token
+from dropbox_auth import get_dropbox_client
 
-def upload_to_dropbox(file_path, dropbox_path):
-    access_token = get_access_token()
+def list_files(folder_path="/Apps/slot-data-analyzer"):
+    dbx = get_dropbox_client()
+    res = dbx.files_list_folder(folder_path)
+    return res.entries
 
-    with open(file_path, "rb") as f:
-        data = f.read()
+def download_file(path):
+    dbx = get_dropbox_client()
+    _, res = dbx.files_download(path)
+    return res.content
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Dropbox-API-Arg": str({
-            "path": dropbox_path,
-            "mode": "overwrite",
-            "autorename": False,
-            "mute": False
-        }).replace("'", '"'),
-        "Content-Type": "application/octet-stream"
-    }
+def delete_file(path):
+    dbx = get_dropbox_client()
+    dbx.files_delete_v2(path)
 
-    response = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data)
-    response.raise_for_status()
-    print("✅ アップロード成功:", dropbox_path)
-
-def read_from_dropbox(dropbox_path):
-    access_token = get_access_token()
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Dropbox-API-Arg": str({ "path": dropbox_path }).replace("'", '"')
-    }
-
-    response = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers)
-    response.raise_for_status()
-    return response.content.decode("utf-8")
+def upload_file(path, content):
+    dbx = get_dropbox_client()
+    dbx.files_upload(content, path, mode=dropbox.files.WriteMode("overwrite"))
