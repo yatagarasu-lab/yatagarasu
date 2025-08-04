@@ -1,11 +1,8 @@
-import os
-import dropbox
+# analyze_latest_file.py
+
 from file_manager import organize_dropbox_files
 
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-def analyze_latest_file():
+def analyze_latest_file(dbx):
     latest_file = organize_dropbox_files()
     if not latest_file:
         print("❌ 解析対象ファイルが見つかりませんでした。")
@@ -22,6 +19,12 @@ def analyze_latest_file():
     # ここでGPT APIによる要約や構造解析を追加できます（省略中）
     print("✅ 解析完了")
 
-# デバッグ時に単体実行可能にする
+# デバッグ時のスタンドアロン実行用
 if __name__ == "__main__":
-    analyze_latest_file()
+    import dropbox
+
+    # 🔧 ここで直接アクセストークンを記述 or 別ファイル・引数から受け取る
+    access_token = "YOUR_ACCESS_TOKEN_HERE"  # <-- 差し替え用（環境変数は使わない）
+    dbx = dropbox.Dropbox(access_token)
+
+    analyze_latest_file(dbx)
