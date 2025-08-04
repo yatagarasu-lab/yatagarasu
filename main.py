@@ -1,3 +1,7 @@
+<details>
+<summary>📦 完全版 main.py（LINE × Dropbox × GPT × GAS対応）</summary>
+
+```python
 from flask import Flask, request, jsonify
 import os
 import dropbox
@@ -18,12 +22,9 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GAS_WEBHOOK_URL = os.getenv("GAS_WEBHOOK_URL")
-GITHUB_OWNER = os.getenv("GITHUB_OWNER")  # GitHubユーザー名 or org名
-GITHUB_REPO = os.getenv("GITHUB_REPO")    # リポジトリ名
 
 openai.api_key = OPENAI_API_KEY
 
-# Dropbox関連
 def get_access_token():
     token_url = "https://api.dropbox.com/oauth2/token"
     payload = {
@@ -61,7 +62,6 @@ def find_duplicates(files):
                 hash_map[hash_val] = file.path_display
     return duplicates
 
-# GPTによる要約
 def summarize_file(file_path):
     try:
         content = download_file(file_path)
@@ -81,7 +81,9 @@ def summarize_file(file_path):
             text = content.decode("utf-8", errors="ignore")
             response = openai.chat.completions.create(
                 model="gpt-4o",
-                messages=[{"role": "user", "content": f"以下を要約してください:\n{text}"}]
+                messages=[
+                    {"role": "user", "content": f"以下を要約してください:\n{text}"}
+                ]
             )
             return response.choices[0].message.content
         else:
@@ -103,34 +105,21 @@ def send_line_notify(message):
     print(f"📬 LINE通知: {res.status_code} / {res.text}")
 
 def send_to_spreadsheet(source, message):
-    payload = {"source": source, "message": message}
+    payload = {
+        "source": source,
+        "message": message
+    }
     try:
         response = requests.post(GAS_WEBHOOK_URL, json=payload)
         print(f"📤 GAS送信結果: {response.status_code} / {response.text}")
     except Exception as e:
         print(f"❌ GAS送信エラー: {source} / {e}")
 
-# GitHub README取得 & GPT要約
-def fetch_github_readme():
-    try:
-        url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/main/README.md"
-        res = requests.get(url)
-        if res.status_code == 200:
-            text = res.text
-            summary = openai.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": f"このGitHubのREADMEを要約してください:\n{text}"}]
-            )
-            return summary.choices[0].message.content
-        else:
-            return f"README取得失敗: {res.status_code}"
-    except Exception as e:
-        return f"GitHub要約失敗: {str(e)}"
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     user_agent = request.headers.get("User-Agent", "").lower()
     print(f"📩 Webhook受信: User-Agent={user_agent}")
+
     if "line-bot" in user_agent:
         return handle_line_webhook()
     elif "dropbox" in user_agent:
@@ -167,13 +156,6 @@ def handle_dropbox_webhook():
     except Exception as e:
         print(f"❌ Dropbox処理エラー: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/github-summary", methods=["GET"])
-def github_summary():
-    print("🔍 GitHub READMEの要約開始")
-    summary = fetch_github_readme()
-    send_line_notify(f"📘GitHub要約:\n{summary}")
-    return jsonify({"summary": summary})
 
 @app.route("/", methods=["GET"])
 def index():
