@@ -2,28 +2,46 @@
 
 from flask import Flask, request, jsonify
 import os
-from processor import process_all_files
-from log_utils import log
+from gpt_summarizer import summarize_file
+from dropbox_handler import get_new_files
 
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
 def index():
-    return "✅ Yatagarasu GPT解析BOT 動作中"
+    return "📦 Dropbox × GPT API is running"
 
-@app.route("/webhook", methods=["GET", "POST"])
-def webhook():
-    if request.method == "GET":
-        # Dropbox Webhookの認証確認用（challengeパラメータを返す）
-        challenge = request.args.get("challenge")
-        return challenge, 200
+# Dropbox Webhook確認用（必須）
+@app.route("/dropbox-webhook", methods=["GET"])
+def verify_dropbox():
+    return request.args.get("challenge")
 
-    if request.method == "POST":
-        # Webhook通知が来た場合 → Dropbox内の全ファイルを処理
-        log("📥 Dropbox Webhook受信、ファイル解析開始")
-        process_all_files()
-        return "OK", 200
+# Dropbox Webhookが発火したときに呼ばれるPOSTハンドラ
+@app.route("/dropbox-webhook", methods=["POST"])
+def handle_dropbox_webhook():
+    print("📥 Dropbox Webhook 発火")
+
+    # 新規ファイルのみ取得
+    new_files = get_new_files()
+
+    for filename, content in new_files:
+        print(f"🧠 GPT処理中: {filename}")
+        summary = summarize_file(filename, content)
+        print(f"✅ 要約結果: {summary}")
+
+    return "", 200
+
+# ローカル確認用（手動テスト用）
+@app.route("/test", methods=["GET"])
+def test_dropbox_trigger():
+    new_files = get_new_files()
+    results = []
+
+    for filename, content in new_files:
+        summary = summarize_file(filename, content)
+        results.append({"file": filename, "summary": summary})
+
+    return jsonify(results)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=False, host="0.0.0.0", port=port)
+    app.run(debug=True)
