@@ -1,41 +1,59 @@
 import os
 import dropbox
-import requests
+import openai
+from requests_oauthlib import OAuth2Session
 
-# 環境変数から認証情報を取得
+# Dropbox APIキー類
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
-# アクセストークンをリフレッシュトークンから取得
+# OpenAI APIキー
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
+
+
 def get_dropbox_access_token():
     token_url = "https://api.dropbox.com/oauth2/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": DROPBOX_REFRESH_TOKEN,
-        "client_id": DROPBOX_APP_KEY,
-        "client_secret": DROPBOX_APP_SECRET,
-    }
-    response = requests.post(token_url, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
+    session = OAuth2Session(client_id=DROPBOX_APP_KEY)
+    token = session.refresh_token(
+        token_url=token_url,
+        refresh_token=DROPBOX_REFRESH_TOKEN,
+        client_id=DROPBOX_APP_KEY,
+        client_secret=DROPBOX_APP_SECRET
+    )
+    return token["access_token"]
 
-# DropboxのWebhookイベントを処理（ファイル一覧を取得して表示）
+
+def analyze_file_with_gpt(file_content: str) -> str:
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "あなたはDropboxに保存されたテキストファイルを分析するAIです。"},
+                {"role": "user", "content": file_content}
+            ],
+            max_tokens=500
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        return f"[GPT ERROR] {e}"
+
+
 def handle_dropbox_webhook():
     access_token = get_dropbox_access_token()
     dbx = dropbox.Dropbox(access_token)
 
     try:
-        # Dropboxのルートディレクトリ内のファイルを取得
-        result = dbx.files_list_folder(path="")
-
-        print("=== Dropboxファイル一覧 ===")
+        result = dbx.files_list_folder(path="/Apps/slot-data-analyzer")
         for entry in result.entries:
-            print(f"- {entry.name}")
-        print("===========================")
+            if isinstance(entry, dropbox.files.FileMetadata):
+                _, res = dbx.files_download(entry.path_display)
+                content = res.content.decode("utf-8")
 
+                gpt_result = analyze_file_with_gpt(content)
+                print(f"\n=== {entry.name} の解析結果 ===\n{gpt_result}\n====================")
     except Exception as e:
-        print(f"エラー: {e}")
-        return "Internal Server Error", 500
+        print(f"[Dropbox ERROR] {e}")
 
     return "OK", 200
