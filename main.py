@@ -1,19 +1,17 @@
 from flask import Flask, request
-from dropbox_integration import handle_dropbox_webhook
+from services.dropbox_handler import handle_dropbox_webhook
 
 app = Flask(__name__)
 
+# Dropbox Webhookエンドポイント
+@app.route("/dropbox-webhook", methods=["GET", "POST"])
+def dropbox_webhook():
+    return handle_dropbox_webhook(request)
 
-@app.route("/", methods=["GET"])
-def health_check():
-    return "Server is running", 200
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    print("✅ Dropbox webhook received.")
-    return handle_dropbox_webhook()
-
+# Render動作確認用
+@app.route("/")
+def index():
+    return "🟢 YATAGARASU Webhook Server is running."
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True, port=5000)
