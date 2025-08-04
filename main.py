@@ -1,17 +1,19 @@
-import os
 from flask import Flask, request
 from dropbox_integration import handle_dropbox_webhook
 
 app = Flask(__name__)
 
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return "Yatagarasu is live!", 200
+    return "Server is running", 200
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    print("✅ Dropbox webhook received.")
     return handle_dropbox_webhook()
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
