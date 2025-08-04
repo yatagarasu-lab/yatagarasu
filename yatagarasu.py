@@ -1,56 +1,59 @@
-import openai
-import dropbox
-
-# 環境変数からAPIキーなどを取得
 import os
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+import dropbox
+from openai import OpenAI
+from dotenv import load_dotenv
 
-# GPT API初期化
-openai.api_key = OPENAI_API_KEY
+load_dotenv()  # .envから環境変数を読み込む
 
-# Dropbox API初期化（refresh_token対応）
-from dropbox.oauth import DropboxOAuth2FlowNoRedirect
-from dropbox import Dropbox
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+GPT_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_FOLDER = "/Apps/slot-data-analyzer"  # 使用フォルダ名
 
-dbx = Dropbox(
-    app_key=DROPBOX_APP_KEY,
-    app_secret=DROPBOX_APP_SECRET,
-    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
-)
+client = OpenAI(api_key=GPT_API_KEY)
 
-# ファイル一覧を取得
-def list_files(folder_path="/Apps/slot-data-analyzer"):
-    result = dbx.files_list_folder(folder_path)
-    return result.entries
+def list_files(folder_path=DROPBOX_FOLDER):
+    """Dropboxフォルダ内のファイル一覧を取得"""
+    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+    res = dbx.files_list_folder(folder_path, recursive=True)
+    files = [entry for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata)]
+    return sorted(files, key=lambda x: x.server_modified, reverse=True)
 
-# ファイル内容を読み込む（バイナリ → テキスト変換）
-def download_and_read_text(path):
+def download_file(path):
+    """Dropbox上の指定ファイルをダウンロード"""
+    dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
     _, res = dbx.files_download(path)
-    content = res.content.decode('utf-8', errors='ignore')
-    return content
+    return res.content.decode("utf-8", errors="ignore")
 
-# GPTに解析依頼
-def analyze_text_with_gpt(text):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "あなたはスロット設定解析の専門家です。"},
-            {"role": "user", "content": f"以下のデータを解析してください：\n\n{text}"}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+def analyze_latest_file():
+    """Dropboxの最新ファイルをGPTで解析"""
+    try:
+        files = list_files()
+        if not files:
+            return "Dropbox内にファイルが見つかりませんでした。"
 
-# メイン処理：最新ファイルを解析
-def analyze_latest_file(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    if not files:
-        return "解析対象ファイルが見つかりませんでした。"
+        latest = files[0]
+        print(f"🗂 最新ファイル: {latest.name}")
 
-    latest_file = sorted(files, key=lambda x: x.server_modified, reverse=True)[0]
-    text = download_and_read_text(latest_file.path_display)
-    analysis_result = analyze_text_with_gpt(text)
+        content = download_file(latest.path_display)
 
-    return f"✅ 最新ファイル名: {latest_file.name}\n\n🧠 解析結果:\n{analysis_result}"
+        prompt = f"""以下のデータを読み取り、スロット設定や傾向について分析してください。
+        
+--- データ開始 ---
+{content[:3000]}
+--- データ終了（省略） ---
+"""
+
+        print("🤖 ChatGPT に送信中...")
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+
+        summary = response.choices[0].message.content.strip()
+        print("✅ 解析完了！")
+        return summary
+
+    except Exception as e:
+        print(f"❌ 解析中にエラー発生: {e}")
+        return f"解析中にエラーが発生しました: {e}"
