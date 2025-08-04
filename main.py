@@ -1,39 +1,83 @@
-from flask import Flask, request, jsonify
-from services.dropbox_handler import handle_dropbox_webhook
-from services.gpt_summarizer import summarize_and_check_duplicate
-from services.line_handler import push_line_message
+import os
+from flask import Flask, request, abort
+from dotenv import load_dotenv
 
+# LINE関連
+from linebot import LineBotApi, WebhookParser
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+
+# DropboxとGPT関連（services配下のモジュール）
+from services.dropbox_handler import handle_dropbox_file_event
+from services.gpt_summarizer import summarize_file
+
+# 環境変数読み込み
+load_dotenv()
+
+# Flaskアプリ
 app = Flask(__name__)
 
-@app.route("/", methods=["GET", "POST"])
-def home():
-    return "Yatagarasu: Dropbox × GPT × LINE Bot", 200
+# LINE初期化
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# DropboxのWebhookエンドポイント
-@app.route("/dropbox-webhook", methods=["POST"])
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+parser = WebhookParser(LINE_CHANNEL_SECRET)
+
+# Dropbox webhookエンドポイント
+@app.route("/dropbox-webhook", methods=['GET', 'POST'])
 def dropbox_webhook():
-    # DropboxがWebhookの疎通確認のためにHEADリクエストを送る場合もある
-    if request.method == "HEAD":
-        return "", 200
+    if request.method == 'GET':
+        return request.args.get('challenge')
+    elif request.method == 'POST':
+        print("✅ Dropbox Webhook POST受信")
+        try:
+            modified_files = handle_dropbox_file_event()
+            print(f"📂 処理対象ファイル: {modified_files}")
 
-    # Webhook POSTリクエスト処理開始
-    print("📥 Dropbox Webhook 呼び出し検出")
+            for file_path in modified_files:
+                summary = summarize_file(file_path)
+                print(f"🧠 要約結果: {summary}")
+
+                if LINE_USER_ID:
+                    line_bot_api.push_message(
+                        LINE_USER_ID,
+                        TextSendMessage(text=f"📝 要約:\n{summary}")
+                    )
+
+            return '', 200
+        except Exception as e:
+            print(f"❌ エラー: {e}")
+            abort(500)
+
+# LINE webhookエンドポイント
+@app.route("/line-webhook", methods=['POST'])
+def line_webhook():
+    signature = request.headers.get("X-Line-Signature")
+    body = request.get_data(as_text=True)
 
     try:
-        # ファイルの取得と要約＆重複チェック
-        summaries = handle_dropbox_webhook()
+        events = parser.parse(body, signature)
+    except InvalidSignatureError:
+        abort(400)
 
-        # 通知用メッセージ作成
-        if not summaries:
-            message = "新規ファイルはありませんでした。"
-        else:
-            message = "📦 Dropbox更新ファイル:\n" + "\n".join(summaries)
+    for event in events:
+        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
+            user_message = event.message.text
+            reply_text = "ありがとうございます"
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
 
-        # LINEに通知送信
-        push_line_message(message)
+    return "OK"
 
-        return jsonify({"status": "success"}), 200
+# Renderのライブ確認用（任意）
+@app.route("/", methods=["GET"])
+def index():
+    return "✅ Yatagarasu Auto System is Live"
 
-    except Exception as e:
-        print(f"[エラー] Dropbox Webhook処理失敗: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+# エントリーポイント
+if __name__ == "__main__":
+    app.run(debug=False)
