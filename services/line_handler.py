@@ -1,45 +1,34 @@
-from flask import request, abort
-from linebot.v3.webhook import WebhookParser
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from linebot.v3.messaging import MessagingApi, Configuration, ApiClient, ReplyMessageRequest, TextMessage
 import os
+import requests
 
-# 環境変数からLINE設定取得
-channel_secret = os.environ.get("LINE_CHANNEL_SECRET")
-channel_access_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+# 環境変数からLINE BOTの情報を取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# バリデーション
-if not channel_secret or not channel_access_token:
-    raise ValueError("LINEの環境変数が設定されていません。")
+# LINEにメッセージをPush送信する関数
+def push_line_message(message: str) -> bool:
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("[エラー] LINEのトークンまたはユーザーIDが未設定です。")
+        return False
 
-parser = WebhookParser(channel_secret)
-configuration = Configuration(access_token=channel_access_token)
-
-def handle_line_webhook():
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    data = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": message}]
+    }
 
     try:
-        events = parser.parse(body, signature)
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            print("[LINE通知成功]")
+            return True
+        else:
+            print(f"[LINE通知失敗] ステータスコード: {response.status_code} / 内容: {response.text}")
+            return False
     except Exception as e:
-        print(f"❌ LINEイベントのパース失敗: {e}")
-        abort(400)
-
-    for event in events:
-        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
-            user_text = event.message.text
-            user_id = event.source.user_id
-
-            # ここでGPTなどを使った応答処理を行う（今回は固定返信）
-            reply_text = "ありがとうございます"
-
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_text)]
-                    )
-                )
-
-    return "✅ LINEイベント処理完了"
+        print(f"[LINE通知例外] {str(e)}")
+        return False
