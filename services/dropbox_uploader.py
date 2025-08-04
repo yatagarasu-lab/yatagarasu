@@ -1,19 +1,18 @@
-# services/dropbox_uploader.py
-
 import dropbox
 import hashlib
 import os
 from io import BytesIO
 
+# 正しい環境変数を取得
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_CLIENT_ID")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
 # チェック：環境変数が全て設定されているか
 if not all([DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET]):
     raise EnvironmentError("Dropboxの認証情報が不足しています。")
 
-# Dropbox認証
+# Dropbox認証（Refresh Tokenベース）
 dbx = dropbox.Dropbox(
     oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
     app_key=DROPBOX_APP_KEY,
