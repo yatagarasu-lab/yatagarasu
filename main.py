@@ -1,47 +1,30 @@
-# main.py
-
-from flask import Flask, request, jsonify
-import os
-from gpt_summarizer import summarize_file
-from dropbox_handler import get_new_files
+# main.py（完全版）📦 Render × GitHub × Dropbox × GPT × LINE webhook連携構成
+from flask import Flask, request
+from dropbox_handler import handle_dropbox_webhook
+from line_handler import handle_line_webhook
+from gpt_summarizer import summarize_from_dropbox  # 必要に応じて使用
 
 app = Flask(__name__)
 
+# ヘルスチェック用
 @app.route("/", methods=["GET"])
 def index():
-    return "📦 Dropbox × GPT API is running"
+    return "Yatagarasu AI Bot is running."
 
-# Dropbox Webhook確認用（必須）
-@app.route("/dropbox-webhook", methods=["GET"])
-def verify_dropbox():
-    return request.args.get("challenge")
+# Dropbox webhook 用エンドポイント
+@app.route("/dropbox_webhook", methods=["POST"])
+def dropbox_webhook():
+    return handle_dropbox_webhook()
 
-# Dropbox Webhookが発火したときに呼ばれるPOSTハンドラ
-@app.route("/dropbox-webhook", methods=["POST"])
-def handle_dropbox_webhook():
-    print("📥 Dropbox Webhook 発火")
+# LINE webhook 用エンドポイント
+@app.route("/callback", methods=["POST"])
+def line_callback():
+    return handle_line_webhook()
 
-    # 新規ファイルのみ取得
-    new_files = get_new_files()
-
-    for filename, content in new_files:
-        print(f"🧠 GPT処理中: {filename}")
-        summary = summarize_file(filename, content)
-        print(f"✅ 要約結果: {summary}")
-
-    return "", 200
-
-# ローカル確認用（手動テスト用）
-@app.route("/test", methods=["GET"])
-def test_dropbox_trigger():
-    new_files = get_new_files()
-    results = []
-
-    for filename, content in new_files:
-        summary = summarize_file(filename, content)
-        results.append({"file": filename, "summary": summary})
-
-    return jsonify(results)
+# 必要であればGPT直接実行テスト用エンドポイント（任意）
+@app.route("/test_summarize", methods=["POST"])
+def test_gpt_summary():
+    return summarize_from_dropbox()
 
 if __name__ == "__main__":
     app.run(debug=True)
