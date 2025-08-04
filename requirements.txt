@@ -20,3 +20,4 @@ tqdm
 typing-inspection
 werkzeug
 python-dotenv
+apscheduler
