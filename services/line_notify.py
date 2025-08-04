@@ -1,21 +1,19 @@
+# services/line_notifier.py
 import os
-from linebot.v3.messaging import Configuration, MessagingApi, ApiClient, PushMessageRequest, TextMessage
+from linebot import LineBotApi, WebhookParser
+from linebot.models import TextSendMessage
 
-# 環境変数からLINEアクセストークンとユーザーIDを取得
-channel_access_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-user_id = os.environ.get("LINE_USER_ID")  # 固定ユーザーにPush
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+USER_ID = os.getenv("LINE_USER_ID")
 
-if not channel_access_token or not user_id:
-    raise ValueError("LINEのアクセストークンまたはユーザーIDが設定されていません。")
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-configuration = Configuration(access_token=channel_access_token)
-
-def send_line_message(message: str):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
+def push_text_to_line(message: str):
+    try:
         line_bot_api.push_message(
-            PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=message)]
-            )
+            USER_ID,
+            TextSendMessage(text=message)
         )
+        print("✅ LINE通知送信成功:", message)
+    except Exception as e:
+        print("❌ LINE通知送信エラー:", e)
