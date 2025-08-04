@@ -1,43 +1,39 @@
-# line_handler.py
-
+# line_handler.py（完全版）📱 LINE Messaging API対応
+import os
 from flask import request, abort
-from linebot import LineBotApi, WebhookHandler
+from linebot import LineBotApi, WebhookParser
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import os
 
-# 環境変数からトークン・シークレット取得
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+# 環境変数から取得
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
-if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    raise ValueError("LINEのトークンまたはシークレットが設定されていません。")
+# エラーチェック
+if LINE_CHANNEL_SECRET is None or LINE_CHANNEL_ACCESS_TOKEN is None:
+    raise Exception("LINEの環境変数が設定されていません。")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+parser = WebhookParser(LINE_CHANNEL_SECRET)
 
 def handle_line_webhook():
     signature = request.headers.get("X-Line-Signature")
-
     body = request.get_data(as_text=True)
-    print("Request body:", body)
 
     try:
-        handler.handle(body, signature)
+        events = parser.parse(body, signature)
     except InvalidSignatureError:
         abort(400)
 
+    for event in events:
+        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
+            user_text = event.message.text
+            reply_token = event.reply_token
+
+            # ここでGPTに渡すなど自由に処理可能（とりあえず返信固定）
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="ありがとうございます")
+            )
+
     return "OK"
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_text = event.message.text
-    print(f"受信メッセージ: {user_text}")
-
-    # 応答メッセージ（ここは後でGPTと連携可）
-    reply_text = "ありがとうございます"
-
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
