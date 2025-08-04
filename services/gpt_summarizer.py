@@ -1,73 +1,51 @@
-import os
 import openai
-import dropbox
-import hashlib
-from utils.line_notify import push_message_to_user
+import os
 
-# 環境変数から取得
-DROPBOX_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+# 環境変数からAPIキー取得
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# 初期化
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-openai.api_key = OPENAI_API_KEY
+# GPTで要約を実行する関数
+def summarize_text(text: str, max_tokens: int = 300) -> str:
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY が設定されていません。")
 
-# ファイルのハッシュを計算して重複検出に使用
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+    openai.api_key = OPENAI_API_KEY
 
-# Dropbox内のすべてのファイルリストを取得
-def list_files(folder_path):
-    res = dbx.files_list_folder(folder_path)
-    files = res.entries
-    while res.has_more:
-        res = dbx.files_list_folder_continue(res.cursor)
-        files.extend(res.entries)
-    return [f for f in files if isinstance(f, dropbox.files.FileMetadata)]
-
-# ファイルをダウンロード（バイナリ）
-def download_file(path):
-    metadata, res = dbx.files_download(path)
-    return res.content
-
-# GPTで要約を生成
-def summarize_text(content):
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4-0613",
+            model="gpt-4",
             messages=[
-                {"role": "system", "content": "以下のファイルの内容を短く要約してください。"},
-                {"role": "user", "content": content.decode("utf-8", errors="ignore")[:3000]}
+                {"role": "system", "content": "以下の内容を簡潔に要約してください。"},
+                {"role": "user", "content": text},
             ],
+            max_tokens=max_tokens,
             temperature=0.5,
-            max_tokens=1000
         )
-        return response.choices[0].message.content.strip()
+        return response.choices[0].message["content"].strip()
+
     except Exception as e:
-        return f"[要約失敗] {str(e)}"
+        print(f"[GPT要約エラー] {str(e)}")
+        return "要約に失敗しました。"
 
-# 要約＋重複チェック＋LINE通知
-def summarize_file_and_notify(folder_path="/Apps/slot-data-analyzer"):
-    files = list_files(folder_path)
-    seen_hashes = {}
+# GPTでファイル名用のタイトル生成（任意機能）
+def generate_title(text: str) -> str:
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY が設定されていません。")
 
-    for f in files:
-        path = f.path_display
-        content = download_file(path)
-        hash_value = file_hash(content)
+    openai.api_key = OPENAI_API_KEY
 
-        # 重複チェック
-        if hash_value in seen_hashes:
-            print(f"✅ 重複検出: {path}（同一: {seen_hashes[hash_value]}）")
-            continue
-
-        seen_hashes[hash_value] = path
-
-        summary = summarize_text(content)
-
-        print(f"📤 通知送信: {path}")
-        push_message_to_user(
-            user_id=LINE_USER_ID,
-            text=f"📂 新規ファイル: {path}\n📝 要約:\n{summary}"
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "以下のテキストの内容から、ファイル名に使える短いタイトルを生成してください。"},
+                {"role": "user", "content": text},
+            ],
+            max_tokens=40,
+            temperature=0.5,
         )
+        return response.choices[0].message["content"].strip()
+
+    except Exception as e:
+        print(f"[GPTタイトル生成エラー] {str(e)}")
+        return "untitled"
