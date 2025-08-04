@@ -1,78 +1,44 @@
+# utils.py
+
 import os
-import hashlib
 import dropbox
-from openai import OpenAI
-from PIL import Image
-from io import BytesIO
-import mimetypes
-import base64
+import hashlib
+import requests
 
-# 環境変数
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o")
+# Dropboxからファイル内容を取得
+def download_file_content(dbx, file_path):
+    _, res = dbx.files_download(file_path)
+    return res.content
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-processed_hashes = set()  # 重複判定用ハッシュ集合
-
-def file_hash(content: bytes) -> str:
+# ファイルのハッシュを取得（重複判定用）
+def get_file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
-def is_image_file(path: str) -> bool:
-    mime, _ = mimetypes.guess_type(path)
-    return mime and mime.startswith("image")
+# LINE通知（Push用）
+def send_line_message(message):
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+    user_id = os.getenv("LINE_USER_ID")
 
-def analyze_file_with_gpt(filename: str, content: bytes) -> str:
-    try:
-        if is_image_file(filename):
-            img_base64 = base64.b64encode(content).decode("utf-8")
-            res = client.chat.completions.create(
-                model=GPT_MODEL,
-                messages=[
-                    {"role": "system", "content": "あなたはスロット設定判別AIです。画像やテキストから内容を要約・分析してレポートを作成してください。"},
-                    {"role": "user", "content": f"以下の画像を解析してください（Base64形式）:\n{img_base64}"}
-                ]
-            )
-        else:
-            text = content.decode("utf-8", errors="ignore")
-            res = client.chat.completions.create(
-                model=GPT_MODEL,
-                messages=[
-                    {"role": "system", "content": "あなたはスロット設定判別AIです。"},
-                    {"role": "user", "content": f"以下のテキストを解析してください:\n{text}"}
-                ]
-            )
+    if not line_token or not user_id:
+        print("❌ LINE環境変数が未設定")
+        return
 
-        return res.choices[0].message.content.strip()
+    headers = {
+        "Authorization": f"Bearer {line_token}",
+        "Content-Type": "application/json"
+    }
 
-    except Exception as e:
-        return f"[エラー] 解析失敗: {str(e)}"
+    data = {
+        "to": user_id,
+        "messages": [{
+            "type": "text",
+            "text": message
+        }]
+    }
 
-def download_and_analyze_files(dbx):
-    folder_path = "/Apps/slot-data-analyzer"
-    result_summary = ""
+    response = requests.post("https://api.line.me/v2/bot/message/push", json=data, headers=headers)
 
-    try:
-        files = dbx.files_list_folder(folder_path).entries
-
-        for file in files:
-            if isinstance(file, dropbox.files.FileMetadata):
-                path = file.path_display
-                _, ext = os.path.splitext(path)
-                _, res = os.path.split(path)
-
-                metadata, res = dbx.files_download(path)
-                content = res.content
-
-                h = file_hash(content)
-                if h in processed_hashes:
-                    continue
-                processed_hashes.add(h)
-
-                summary = analyze_file_with_gpt(path, content)
-                result_summary += f"\n\n📄 **{file.name}** の解析結果:\n{summary}"
-
-    except Exception as e:
-        result_summary += f"\n[エラー発生]: {str(e)}"
-
-    return result_summary if result_summary else None
+    if response.status_code != 200:
+        print(f"❌ LINE送信失敗: {response.text}")
+    else:
+        print("✅ LINE通知送信済み")
