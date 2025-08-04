@@ -1,62 +1,40 @@
-import os
 import hashlib
-import dropbox
-from openai import OpenAI
-from services.dropbox_utils import list_files, download_file
+import openai
+import os
 
-# Dropboxアクセストークンの取得（refresh_token方式）
-def get_dropbox_access_token():
-    import requests
-    response = requests.post(
-        "https://api.dropboxapi.com/oauth2/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": os.environ.get("DROPBOX_REFRESH_TOKEN"),
-            "client_id": os.environ.get("DROPBOX_CLIENT_ID"),
-            "client_secret": os.environ.get("DROPBOX_CLIENT_SECRET"),
-        }
-    )
-    response.raise_for_status()
-    return response.json()["access_token"]
+# GPTで要約する関数（テキスト）
+def summarize_text(text, max_tokens=500):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4-1106-preview",
+            messages=[
+                {"role": "system", "content": "次のファイル内容を短く要約してください。"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=max_tokens,
+            temperature=0.3
+        )
+        return response['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        return f"要約に失敗しました: {e}"
 
-# ファイルのSHA-256ハッシュを計算
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+# SHA256によるファイルの重複判定用のハッシュ生成
+def file_hash(binary):
+    return hashlib.sha256(binary).hexdigest()
 
-# GPTで要約処理
-def summarize_text_with_gpt(text):
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "以下のテキストを要約してください。"},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.3,
-        max_tokens=400
-    )
-    return response.choices[0].message.content.strip()
+# 重複ファイルを削除する処理（親で制御される）
+def find_duplicates(files, download_func, delete_func):
+    hash_map = {}
+    duplicates = []
 
-# 重複ファイルを探して削除、要約も行う
-def process_dropbox_files(folder_path="/"):
-    access_token = get_dropbox_access_token()
-    dbx = dropbox.Dropbox(access_token)
-    files = list_files(folder_path, dbx)
-
-    seen_hashes = {}
     for file in files:
-        path = file.path_display
-        content = download_file(path, dbx)
+        content = download_func(file.path_display)
         hash_value = file_hash(content)
 
-        if hash_value in seen_hashes:
-            print(f"重複ファイルを削除: {path}（同一: {seen_hashes[hash_value]}）")
-            dbx.files_delete_v2(path)
+        if hash_value in hash_map:
+            duplicates.append(file.path_display)
+            delete_func(file.path_display)
         else:
-            seen_hashes[hash_value] = path
+            hash_map[hash_value] = file.path_display
 
-            # テキストならGPTで要約（拡張子などから判定）
-            if path.endswith(".txt"):
-                text = content.decode("utf-8", errors="ignore")
-                summary = summarize_text_with_gpt(text)
-                print(f"{path} の要約: {summary}")
+    return duplicates
