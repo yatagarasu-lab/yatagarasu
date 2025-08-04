@@ -1,39 +1,30 @@
-# notifier.py
-
+# notifier.py 📡 LINEなどに通知送信するための共通ユーティリティ
 import os
 import requests
-from log_utils import log
 
-# LINE Push通知を送る（ユーザーIDとトークンは環境変数）
-LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
+# LINEへPush通知
 def send_line_message(message):
-    if not LINE_ACCESS_TOKEN or not USER_ID:
-        log("⚠️ LINE設定が未定義のため通知スキップ")
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("❌ LINE通知に必要な環境変数が未設定です。")
         return
 
+    url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
-
-    data = {
-        "to": USER_ID,
+    body = {
+        "to": LINE_USER_ID,
         "messages": [
             {"type": "text", "text": message}
         ]
     }
-
-    try:
-        res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=data)
-        res.raise_for_status()
-        log("✅ LINE通知成功")
-    except Exception as e:
-        log(f"❌ LINE通知エラー: {e}")
-
-def notify(text, line=True, console=True):
-    if console:
-        log(text)
-    if line:
-        send_line_message(text)
+    response = requests.post(url, headers=headers, json=body)
+    
+    if response.status_code != 200:
+        print(f"❌ LINE通知送信失敗: {response.status_code} - {response.text}")
+    else:
+        print("✅ LINE通知送信完了")
