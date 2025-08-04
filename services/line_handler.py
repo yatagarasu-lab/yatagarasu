@@ -1,34 +1,45 @@
 import os
-import requests
+import dropbox
+from datetime import datetime
+from linebot import LineBotApi
+from linebot.models import MessageEvent, ImageMessage, FileMessage
 
-# 環境変数からLINE BOTの情報を取得
+# 環境変数
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# LINEにメッセージをPush送信する関数
-def push_line_message(message: str) -> bool:
-    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
-        print("[エラー] LINEのトークンまたはユーザーIDが未設定です。")
-        return False
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-    }
-    data = {
-        "to": LINE_USER_ID,
-        "messages": [{"type": "text", "text": message}]
-    }
+# Dropboxアクセストークン取得
+def get_dropbox_client():
+    from services.dropbox_auth import refresh_dropbox_access_token
+    access_token = refresh_dropbox_access_token()
+    return dropbox.Dropbox(oauth2_access_token=access_token)
 
-    try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            print("[LINE通知成功]")
-            return True
-        else:
-            print(f"[LINE通知失敗] ステータスコード: {response.status_code} / 内容: {response.text}")
-            return False
-    except Exception as e:
-        print(f"[LINE通知例外] {str(e)}")
-        return False
+# LINEの画像やファイルをDropboxに保存する
+def save_line_content_to_dropbox(event: MessageEvent):
+    message = event.message
+    user_id = event.source.user_id
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if isinstance(message, ImageMessage):
+        ext = "jpg"
+        filename = f"{timestamp}_img_from_{user_id}.{ext}"
+    elif isinstance(message, FileMessage):
+        ext = message.file_name.split('.')[-1] if '.' in message.file_name else "bin"
+        filename = f"{timestamp}_{message.file_name}"
+    else:
+        print("対応していないメッセージ形式です")
+        return
+
+    # LINEからコンテンツ取得
+    content = line_bot_api.get_message_content(message.id)
+    file_data = content.content
+
+    # Dropboxへ保存
+    dbx = get_dropbox_client()
+    dropbox_path = f"/Apps/slot-data-analyzer/{filename}"
+    dbx.files_upload(file_data, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+    print(f"✅ 保存完了: {dropbox_path}")
