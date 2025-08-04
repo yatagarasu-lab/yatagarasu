@@ -1,38 +1,48 @@
-import os
 import openai
+import os
 
-# OpenAIのAPIキーを環境変数から取得
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# 環境変数からAPIキーを取得
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
-# GPTを使ってテキストを要約する関数
-def summarize_text(content, filename=None):
+def summarize_text(text, model="gpt-4", max_tokens=800):
+    """
+    テキストを要約するための関数
+    """
+    if not text or not OPENAI_API_KEY:
+        return "⚠️ テキストが空、または API キーが設定されていません"
+
     try:
-        # プロンプトの作成
-        prompt = f"""
-次のテキストはDropboxに保存されたファイルの内容です。
-この内容を読み取り、以下の観点で要約・分析してください：
-
-1. ファイルの種類（画像/スロット/メモ/実戦データなど）  
-2. 重要なキーワード・設定差がある情報  
-3. スロットの設定予測が可能ならその要因  
-4. 全体の要点を3行以内にまとめる
-
---- ファイル内容（{filename or '無名ファイル'}） ---
-{content[:4000]}  # 4000文字を上限に送信
-"""
-
-        # ChatGPT API呼び出し
         response = openai.ChatCompletion.create(
-            model="gpt-4o",
+            model=model,
             messages=[
-                {"role": "system", "content": "あなたはDropboxから取得したスロット関連のファイルを自動要約・解析するアシスタントです。"},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "以下のテキストを日本語で要約してください。"},
+                {"role": "user", "content": text}
             ],
-            temperature=0.4
+            max_tokens=max_tokens,
+            temperature=0.5,
         )
-
-        return response.choices[0].message.content.strip()
-
+        return response.choices[0].message['content'].strip()
     except Exception as e:
-        print(f"❌ GPT要約エラー: {e}")
-        return f"【GPTエラー】{e}"
+        return f"❌ GPT要約エラー: {e}"
+
+def analyze_text(text, model="gpt-4", max_tokens=1000):
+    """
+    テキストの内容を分析・解釈して要点を出力する
+    """
+    if not text or not OPENAI_API_KEY:
+        return "⚠️ テキストが空、または API キーが設定されていません"
+
+    try:
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "以下の文章から重要な要点を抽出し、日本語で簡潔にまとめてください。"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=max_tokens,
+            temperature=0.5,
+        )
+        return response.choices[0].message['content'].strip()
+    except Exception as e:
+        return f"❌ GPT分析エラー: {e}"
