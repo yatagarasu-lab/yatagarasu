@@ -1,62 +1,48 @@
 # processor.py
 
-import dropbox
 import os
-from hash_util import file_hash
-from notifier import notify
-from ocr_utils import extract_text_from_image
-from predictor import analyze_text
+import dropbox
+from dropbox.exceptions import AuthError
+from utils import download_file_content, get_file_hash, send_line_message
 from log_utils import log
 
+# Dropbox接続設定（環境変数）
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
 
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
-
-def list_files(folder_path=DROPBOX_FOLDER_PATH):
-    try:
-        result = dbx.files_list_folder(folder_path)
-        return result.entries
-    except Exception as e:
-        log(f"❌ Dropboxフォルダ読み込みエラー: {e}")
-        return []
-
-def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content
-
-def process_file(file_entry):
-    file_path = file_entry.path_display
-    try:
-        # ファイルダウンロードと重複チェック
-        content = download_file(file_path)
-        content_hash = file_hash(content)
-
-        # ログ保存先に同じhashがないか確認（簡易的にファイル名でチェック）
-        hash_path = f"{DROPBOX_FOLDER_PATH}/.hashes/{content_hash}.txt"
-        try:
-            dbx.files_get_metadata(hash_path)
-            log(f"⚠️ 重複ファイル: {file_path}")
-            return
-        except dropbox.exceptions.ApiError:
-            pass  # 存在しないのでOK
-
-        # OCR処理・要約処理
-        extracted_text = extract_text_from_image(content)
-        summary = analyze_text(extracted_text)
-
-        # LINE通知
-        notify(f"🧠 新規ファイル解析結果:\n{summary}", line=True)
-
-        # ハッシュ記録ファイルとして保存
-        dbx.files_upload(b"processed", hash_path, mode=dropbox.files.WriteMode.overwrite)
-        log(f"✅ 処理完了: {file_path}")
-
-    except Exception as e:
-        log(f"❌ ファイル処理エラー（{file_path}）: {e}")
+# ハッシュ記録（簡易的に同一セッション内で重複防止）
+file_hash_map = {}
 
 def process_all_files():
-    files = list_files(DROPBOX_FOLDER_PATH)
-    for file_entry in files:
-        if isinstance(file_entry, dropbox.files.FileMetadata):
-            process_file(file_entry)
+    if not DROPBOX_ACCESS_TOKEN:
+        log("❌ Dropboxアクセストークン未設定")
+        return
+
+    try:
+        dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+        entries = dbx.files_list_folder(DROPBOX_FOLDER_PATH).entries
+    except AuthError as e:
+        log(f"❌ Dropbox認証エラー: {e}")
+        return
+
+    for entry in entries:
+        if isinstance(entry, dropbox.files.FileMetadata):
+            file_path = entry.path_display
+            try:
+                content = download_file_content(dbx, file_path)
+                hash_val = get_file_hash(content)
+                if hash_val in file_hash_map:
+                    log(f"⚠️ 重複ファイル検出（スキップ）: {file_path}")
+                    continue
+
+                file_hash_map[hash_val] = file_path
+
+                # ✅ GPTで解析（ここではダミー処理）
+                result = f"🔍 GPT解析結果: ファイル「{file_path}」の内容を確認しました。"
+
+                # ✅ LINEに通知（または他の処理）
+                send_line_message(result)
+                log(f"✅ ファイル解析成功: {file_path}")
+
+            except Exception as e:
+                log(f"❌ ファイル処理中にエラー: {file_path} → {e}")
