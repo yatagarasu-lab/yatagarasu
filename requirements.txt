@@ -21,3 +21,4 @@ typing-inspection
 werkzeug
 python-dotenv
 apscheduler
+requests-oauthlib
