@@ -1,4 +1,4 @@
-# analyze_latest_file.py
+# yatagarasu.py
 
 from file_manager import organize_dropbox_files
 
@@ -23,8 +23,8 @@ def analyze_latest_file(dbx):
 if __name__ == "__main__":
     import dropbox
 
-    # 🔧 ここで直接アクセストークンを記述 or 別ファイル・引数から受け取る
-    access_token = "YOUR_ACCESS_TOKEN_HERE"  # <-- 差し替え用（環境変数は使わない）
+    # 🔧 ここで直接アクセストークンを記述
+    access_token = "YOUR_ACCESS_TOKEN_HERE"  # ← 本番では直接貼るか別ファイルで安全に管理
     dbx = dropbox.Dropbox(access_token)
 
     analyze_latest_file(dbx)
