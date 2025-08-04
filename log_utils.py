@@ -1,36 +1,20 @@
-import os
-import glob
-from datetime import datetime, timedelta
+# log_utils.py
 
-LOG_DIR = "logs"
-LOG_PATTERN = os.path.join(LOG_DIR, "*.log")
+from datetime import datetime
 
+# タイムスタンプ付きログ出力
+def log(message):
+    now = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    print(f"{now} {message}")
 
-def delete_old_logs(keep_days=7):
-    """指定日数より古いログファイルを削除"""
-    now = datetime.now()
-    for log_file in glob.glob(LOG_PATTERN):
-        modified_time = datetime.fromtimestamp(os.path.getmtime(log_file))
-        if now - modified_time > timedelta(days=keep_days):
-            os.remove(log_file)
+# 成功メッセージ通知フォーマット
+def format_success(file_path, summary):
+    return f"✅ 新規ファイル検出\n📄 {file_path}\n📝 要約:\n{summary}"
 
+# 重複検出メッセージ
+def format_duplicate(file_path, original_path):
+    return f"⚠️ 重複ファイル検出\n🗂 {file_path}\n📌 同一内容: {original_path}"
 
-def list_log_files():
-    """ログファイル一覧を取得（ファイル名と更新日時）"""
-    logs = []
-    for log_file in glob.glob(LOG_PATTERN):
-        modified_time = os.path.getmtime(log_file)
-        logs.append({
-            "filename": os.path.basename(log_file),
-            "modified": datetime.fromtimestamp(modified_time).isoformat()
-        })
-    return logs
-
-
-def download_log_file(filename):
-    """特定のログファイルのパスを返す"""
-    file_path = os.path.join(LOG_DIR, filename)
-    if os.path.exists(file_path):
-        return file_path
-    else:
-        return None
+# エラーフォーマット
+def format_error(context, detail=""):
+    return f"❌ エラー: {context}\n🔍 詳細: {detail}"
