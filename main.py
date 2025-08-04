@@ -1,23 +1,29 @@
-from flask import Flask, request
-from duplicate_cleaner import find_duplicates
+# main.py
+
+from flask import Flask, request, jsonify
+import os
+from processor import process_all_files
+from log_utils import log
 
 app = Flask(__name__)
 
-@app.route("/dropbox-webhook", methods=["GET", "POST"])
-def dropbox_webhook():
+@app.route("/", methods=["GET"])
+def index():
+    return "✅ Yatagarasu GPT解析BOT 動作中"
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
     if request.method == "GET":
-        return request.args.get("challenge", "no challenge"), 200
+        # Dropbox Webhookの認証確認用（challengeパラメータを返す）
+        challenge = request.args.get("challenge")
+        return challenge, 200
 
     if request.method == "POST":
-        try:
-            duplicates = find_duplicates()
-            print(f"重複ファイル一覧: {duplicates}")
-            return "OK", 200
-        except Exception as e:
-            print(f"エラー: {e}")
-            return "ERROR", 500
-
-    return "Unsupported method", 405
+        # Webhook通知が来た場合 → Dropbox内の全ファイルを処理
+        log("📥 Dropbox Webhook受信、ファイル解析開始")
+        process_all_files()
+        return "OK", 200
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, host="0.0.0.0", port=port)
