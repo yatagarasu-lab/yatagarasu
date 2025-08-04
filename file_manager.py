@@ -1,35 +1,49 @@
 import os
 import hashlib
-from services.dropbox_handler import list_files, move_file, download_file, create_folder_if_not_exists
+import dropbox
+from dropbox.files import FileMetadata
 
-# フォルダ名定義
-PROCESSED_FOLDER = "/processed"
-DUPLICATE_FOLDER = "/duplicates"
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN")
+DROPBOX_TARGET_FOLDER = "/Apps/slot-data-analyzer"
 
-# ハッシュ生成関数（重複検出用）
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+
 def file_hash(content):
     return hashlib.sha256(content).hexdigest()
 
-# Dropbox内のファイルを整理するメイン関数
-def organize_dropbox_files():
-    print("[整理開始] Dropboxファイルの重複確認とフォルダ移動を実行します...")
-    files = list_files("/")
-    hash_map = {}
+def list_files(folder_path=DROPBOX_TARGET_FOLDER):
+    entries = []
+    result = dbx.files_list_folder(folder_path)
+    entries.extend(result.entries)
+    while result.has_more:
+        result = dbx.files_list_folder_continue(result.cursor)
+        entries.extend(result.entries)
+    return [entry for entry in entries if isinstance(entry, FileMetadata)]
 
+def find_latest_file(files):
+    latest_file = max(files, key=lambda x: x.client_modified)
+    return latest_file
+
+def delete_duplicates(files):
+    hash_map = {}
     for file in files:
         path = file.path_display
-        content = download_file(path)
+        _, res = dbx.files_download(path)
+        content = res.content
         hash_value = file_hash(content)
-
         if hash_value in hash_map:
-            # 重複ファイル → duplicatesフォルダへ
-            print(f"[重複検出] {path} は {hash_map[hash_value]} と同一内容")
-            create_folder_if_not_exists(DUPLICATE_FOLDER)
-            move_file(path, DUPLICATE_FOLDER + "/" + os.path.basename(path))
+            print(f"🗑️ 重複ファイル削除: {path}")
+            dbx.files_delete_v2(path)
         else:
-            # 新規ファイル → processedフォルダへ
-            create_folder_if_not_exists(PROCESSED_FOLDER)
-            move_file(path, PROCESSED_FOLDER + "/" + os.path.basename(path))
             hash_map[hash_value] = path
 
-    print("[整理完了]")
+def organize_dropbox_files():
+    files = list_files()
+    if not files:
+        print("⚠️ Dropboxにファイルがありません。")
+        return None
+
+    delete_duplicates(files)
+    latest_file = find_latest_file(files)
+    print(f"📦 最新ファイル: {latest_file.name}")
+    return latest_file
