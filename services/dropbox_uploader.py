@@ -1,13 +1,11 @@
-# services/dropbox_uploader.py
-
 import dropbox
 import hashlib
 import os
 
 def get_dropbox_client():
     DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-    DROPBOX_APP_KEY = os.getenv("DROPBOX_CLIENT_ID")
-    DROPBOX_APP_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
+    DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+    DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 
     if not all([DROPBOX_REFRESH_TOKEN, DROPBOX_APP_KEY, DROPBOX_APP_SECRET]):
         raise EnvironmentError("Dropboxの認証情報が不足しています。")
