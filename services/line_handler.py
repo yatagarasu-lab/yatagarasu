@@ -1,39 +1,45 @@
-# services/line_handler.py
-
+from flask import request, abort
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.messaging import MessagingApi, Configuration, ApiClient, ReplyMessageRequest, TextMessage
 import os
-from flask import request
-from linebot import LineBotApi, WebhookParser
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# 環境変数からLINE設定取得
+channel_secret = os.environ.get("LINE_CHANNEL_SECRET")
+channel_access_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 
-if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
-    raise Exception("LINEの環境変数が不足しています")
+# バリデーション
+if not channel_secret or not channel_access_token:
+    raise ValueError("LINEの環境変数が設定されていません。")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-parser = WebhookParser(LINE_CHANNEL_SECRET)
+parser = WebhookParser(channel_secret)
+configuration = Configuration(access_token=channel_access_token)
 
-def handle_line_request():
-    signature = request.headers.get("X-Line-Signature")
+def handle_line_webhook():
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
     try:
         events = parser.parse(body, signature)
-    except InvalidSignatureError:
-        return "Invalid signature", 400
+    except Exception as e:
+        print(f"❌ LINEイベントのパース失敗: {e}")
+        abort(400)
 
     for event in events:
-        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
-            user_message = event.message.text
-            reply_token = event.reply_token
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="ありがとうございます"))
+        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
+            user_text = event.message.text
+            user_id = event.source.user_id
 
-    return "OK", 200
+            # ここでGPTなどを使った応答処理を行う（今回は固定返信）
+            reply_text = "ありがとうございます"
 
-def push_message_to_user(user_id, message):
-    try:
-        line_bot_api.push_message(user_id, TextSendMessage(text=message))
-    except Exception as e:
-        print(f"[LINE] Pushメッセージ送信エラー: {e}")
+            with ApiClient(configuration) as api_client:
+                line_bot_api = MessagingApi(api_client)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[TextMessage(text=reply_text)]
+                    )
+                )
+
+    return "✅ LINEイベント処理完了"
