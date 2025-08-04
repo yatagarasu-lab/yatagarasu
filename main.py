@@ -1,7 +1,3 @@
-<details>
-<summary>📦 完全版 main.py（LINE × Dropbox × GPT × GAS対応）</summary>
-
-```python
 from flask import Flask, request, jsonify
 import os
 import dropbox
@@ -14,7 +10,7 @@ import requests
 
 app = Flask(__name__)
 
-# 環境変数の読み込み
+# 環境変数
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_CLIENT_ID = os.getenv("DROPBOX_CLIENT_ID")
 DROPBOX_CLIENT_SECRET = os.getenv("DROPBOX_CLIENT_SECRET")
@@ -38,7 +34,7 @@ def get_access_token():
 
 def list_files():
     dbx = dropbox.Dropbox(get_access_token())
-    result = dbx.files_list_folder(path="", recursive=True)
+    result = dbx.files_list_folder(path="/Apps/slot-data-analyzer", recursive=True)
     return result.entries
 
 def download_file(path):
