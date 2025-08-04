@@ -1,62 +1,62 @@
 # processor.py
+
+import dropbox
 import os
-import time
-from dropbox_handler import list_files, download_file, delete_file
-from gpt_handler import analyze_file_with_gpt, is_slot_related
-from line_handler import send_line_message
-import hashlib
+from hash_util import file_hash
+from notifier import notify
+from ocr_utils import extract_text_from_image
+from predictor import analyze_text
+from log_utils import log
 
-PROCESSED_HASHES_FILE = "processed_hashes.txt"
-USER_ID = os.getenv("LINE_USER_ID")
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
 
-# ファイルのハッシュ値を計算
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 
-# 処理済みハッシュを読み込む
-def load_processed_hashes():
-    if not os.path.exists(PROCESSED_HASHES_FILE):
-        return set()
-    with open(PROCESSED_HASHES_FILE, "r") as f:
-        return set(line.strip() for line in f.readlines())
+def list_files(folder_path=DROPBOX_FOLDER_PATH):
+    try:
+        result = dbx.files_list_folder(folder_path)
+        return result.entries
+    except Exception as e:
+        log(f"❌ Dropboxフォルダ読み込みエラー: {e}")
+        return []
 
-# 処理済みハッシュを保存
-def save_processed_hash(hash_value):
-    with open(PROCESSED_HASHES_FILE, "a") as f:
-        f.write(f"{hash_value}\n")
+def download_file(path):
+    _, res = dbx.files_download(path)
+    return res.content
 
-# Dropboxフォルダのファイルを処理
-def process_files():
-    print("[INFO] 処理開始...")
-    processed_hashes = load_processed_hashes()
-    files = list_files()
+def process_file(file_entry):
+    file_path = file_entry.path_display
+    try:
+        # ファイルダウンロードと重複チェック
+        content = download_file(file_path)
+        content_hash = file_hash(content)
 
-    for file in files:
-        path = file.path_display
-        content = download_file(path)
-        if not content:
-            continue
+        # ログ保存先に同じhashがないか確認（簡易的にファイル名でチェック）
+        hash_path = f"{DROPBOX_FOLDER_PATH}/.hashes/{content_hash}.txt"
+        try:
+            dbx.files_get_metadata(hash_path)
+            log(f"⚠️ 重複ファイル: {file_path}")
+            return
+        except dropbox.exceptions.ApiError:
+            pass  # 存在しないのでOK
 
-        hash_value = file_hash(content)
-        if hash_value in processed_hashes:
-            print(f"[SKIP] 重複ファイル: {path}")
-            continue
+        # OCR処理・要約処理
+        extracted_text = extract_text_from_image(content)
+        summary = analyze_text(extracted_text)
 
-        # テキスト形式に変換（画像ならOCRなどは未対応）
-        text = content.decode("utf-8", errors="ignore")
+        # LINE通知
+        notify(f"🧠 新規ファイル解析結果:\n{summary}", line=True)
 
-        # GPTで内容を分析
-        result = analyze_file_with_gpt(path, text)
+        # ハッシュ記録ファイルとして保存
+        dbx.files_upload(b"processed", hash_path, mode=dropbox.files.WriteMode.overwrite)
+        log(f"✅ 処理完了: {file_path}")
 
-        if "無関係" in result or not is_slot_related(result):
-            print(f"[DELETE] 非スロット: {path}")
-            delete_file(path)
-            continue
+    except Exception as e:
+        log(f"❌ ファイル処理エラー（{file_path}）: {e}")
 
-        # スロット関連なので通知
-        send_line_message(USER_ID, f"📊 スロットデータ検出:\n\n{result}")
-        print(f"[OK] 通知送信: {path}")
-
-        save_processed_hash(hash_value)
-
-    print("[INFO] 処理完了。")
+def process_all_files():
+    files = list_files(DROPBOX_FOLDER_PATH)
+    for file_entry in files:
+        if isinstance(file_entry, dropbox.files.FileMetadata):
+            process_file(file_entry)
