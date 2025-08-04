@@ -1,39 +1,38 @@
 import os
 import openai
 
-# 環境変数からAPIキーを取得
+# OpenAIのAPIキーを環境変数から取得
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def summarize_text(text, max_tokens=300):
+# GPTを使ってテキストを要約する関数
+def summarize_text(content, filename=None):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "以下の内容を簡潔に要約してください。"},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=max_tokens,
-            temperature=0.3
-        )
-        summary = response['choices'][0]['message']['content'].strip()
-        return summary
-    except Exception as e:
-        print(f"要約エラー: {e}")
-        return "要約に失敗しました。"
+        # プロンプトの作成
+        prompt = f"""
+次のテキストはDropboxに保存されたファイルの内容です。
+この内容を読み取り、以下の観点で要約・分析してください：
 
-def analyze_text(text):
-    try:
+1. ファイルの種類（画像/スロット/メモ/実戦データなど）  
+2. 重要なキーワード・設定差がある情報  
+3. スロットの設定予測が可能ならその要因  
+4. 全体の要点を3行以内にまとめる
+
+--- ファイル内容（{filename or '無名ファイル'}） ---
+{content[:4000]}  # 4000文字を上限に送信
+"""
+
+        # ChatGPT API呼び出し
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "以下の内容を分析してください。必要に応じて改善提案も加えてください。"},
-                {"role": "user", "content": text}
+                {"role": "system", "content": "あなたはDropboxから取得したスロット関連のファイルを自動要約・解析するアシスタントです。"},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
-            temperature=0.5
+            temperature=0.4
         )
-        analysis = response['choices'][0]['message']['content'].strip()
-        return analysis
+
+        return response.choices[0].message.content.strip()
+
     except Exception as e:
-        print(f"解析エラー: {e}")
-        return "解析に失敗しました。"
+        print(f"❌ GPT要約エラー: {e}")
+        return f"【GPTエラー】{e}"
