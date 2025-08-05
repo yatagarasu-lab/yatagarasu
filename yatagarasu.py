@@ -1,19 +1,26 @@
-from file_manager import organize_dropbox_files, get_dropbox_client
+# yatagarasu_sender.py（八咫烏側：E.T Code にコード送信）
 
-def analyze_latest_file():
-    dbx = get_dropbox_client()
-    latest_file = organize_dropbox_files("/")
-    if not latest_file:
-        print("❌ 解析対象ファイルが見つかりません。")
-        return
+import requests
 
-    path = latest_file.path_display
-    metadata, res = dbx.files_download(path)
-    content = res.content.decode("utf-8", errors="ignore")
+ETCODE_URL = "https://your-etcode-url.onrender.com/update-code"  # ←正しいURLに変更
 
-    print(f"📊 ファイル名: {latest_file.name}")
-    print(f"📥 コンテンツ一部:\n{content[:500]}")
-    print("✅ 解析完了")
+def send_code(filename, code):
+    payload = {
+        "filename": filename,
+        "code": code
+    }
 
+    response = requests.post(ETCODE_URL, json=payload)
+
+    if response.status_code == 200:
+        print(f"[成功] {filename} を E.T Code に送信しました")
+    else:
+        print(f"[失敗] ステータス: {response.status_code}")
+        print(response.text)
+
+# テスト送信例
 if __name__ == "__main__":
-    analyze_latest_file()
+    code_to_send = """
+print("これは八咫烏から送られたコードです！")
+"""
+    send_code("main.py", code_to_send)
