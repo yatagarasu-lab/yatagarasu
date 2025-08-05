@@ -1,34 +1,37 @@
-import os
 import json
-from flask import Blueprint, request, Response
+import dropbox
+from flask import request
 from gpt_analyzer import analyze_and_notify
-from dropbox_handler import handle_dropbox_webhook
 
-webhook_bp = Blueprint("webhook", __name__)
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 
-VERIFY_TOKEN = os.getenv("DROPBOX_VERIFY_TOKEN", "default_token")
-
-@webhook_bp.route("/webhook", methods=["GET"])
-def verify():
-    challenge = request.args.get("challenge")
-    return challenge, 200
-
-@webhook_bp.route("/webhook", methods=["POST"])
+# Webhookエンドポイントの処理
 def handle_webhook():
-    if request.headers.get("X-Dropbox-Signature") is None:
-        return "Missing signature", 400
+    # DropboxのWebhook検証用（GET）
+    if request.method == "GET":
+        challenge = request.args.get("challenge")
+        return challenge, 200
 
-    try:
-        data = request.get_json()
-        if not data:
-            return "No data", 400
+    # 通知内容（POST）
+    if request.method == "POST":
+        try:
+            body = request.data.decode("utf-8")
+            data = json.loads(body)
+            user_id = data.get("list_folder", {}).get("accounts", [])[0]
 
-        # DropboxのWebhookからの通知を処理
-        handle_dropbox_webhook(data)
+            # Dropbox APIを使って最新ファイルを取得
+            dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+            entries = dbx.files_list_folder(path="/Apps/slot-data-analyzer").entries
 
-        # GPTによる解析＆LINE通知を実行
-        analyze_and_notify()
+            if entries:
+                latest_file = sorted(entries, key=lambda f: f.client_modified, reverse=True)[0]
+                file_path = latest_file.path_display
 
-        return Response(status=200)
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+                # GPT解析＋LINE通知を実行
+                analyze_and_notify(dbx, file_path)
+
+        except Exception as e:
+            print("Webhook処理中にエラー:", e)
+            return "Error", 500
+
+        return "OK", 200
