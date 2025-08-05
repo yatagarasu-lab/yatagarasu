@@ -1,19 +1,38 @@
-# services/line_notifier.py
 import os
-from linebot import LineBotApi, WebhookParser
-from linebot.models import TextSendMessage
+import requests
+import json
 
+# 環境変数からLINEのチャネルアクセストークンとユーザーIDを取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-USER_ID = os.getenv("LINE_USER_ID")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+def send_line_message(message: str):
+    """
+    LINE Pushメッセージを送信する関数
+    """
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("❌ LINEの環境変数が設定されていません")
+        return
 
-def push_text_to_line(message: str):
-    try:
-        line_bot_api.push_message(
-            USER_ID,
-            TextSendMessage(text=message)
-        )
-        print("✅ LINE通知送信成功:", message)
-    except Exception as e:
-        print("❌ LINE通知送信エラー:", e)
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+
+    body = {
+        "to": LINE_USER_ID,
+        "messages": [
+            {
+                "type": "text",
+                "text": message
+            }
+        ]
+    }
+
+    response = requests.post(url, headers=headers, data=json.dumps(body))
+
+    if response.status_code == 200:
+        print("✅ LINE通知を送信しました")
+    else:
+        print(f"❌ LINE通知に失敗しました: {response.status_code} - {response.text}")
