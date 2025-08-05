@@ -1,8 +1,9 @@
-# yatagarasu_sender.py（八咫烏側：E.T Code にコード送信）
+# yatagarasu_sender.py（八咫烏側：E.T Code にコードを送る）
 
 import requests
 
-ETCODE_URL = "https://your-etcode-url.onrender.com/update-code"  # ←正しいURLに変更
+# E.T Code 側のエンドポイントURL（必ず https でRenderのURLを指定）
+ETCODE_URL = "https://your-etcode-url.onrender.com/update-code"  # ←あなたの Render のURLに置き換えてください
 
 def send_code(filename, code):
     payload = {
@@ -10,13 +11,15 @@ def send_code(filename, code):
         "code": code
     }
 
-    response = requests.post(ETCODE_URL, json=payload)
-
-    if response.status_code == 200:
-        print(f"[成功] {filename} を E.T Code に送信しました")
-    else:
-        print(f"[失敗] ステータス: {response.status_code}")
-        print(response.text)
+    try:
+        response = requests.post(ETCODE_URL, json=payload)
+        if response.status_code == 200:
+            print(f"[成功] {filename} を E.T Code に送信しました。")
+        else:
+            print(f"[失敗] ステータス: {response.status_code}")
+            print(response.text)
+    except Exception as e:
+        print(f"[エラー] 送信中に問題が発生しました: {e}")
 
 # テスト送信例
 if __name__ == "__main__":
