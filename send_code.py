@@ -1,31 +1,25 @@
 import os
 import requests
 
-# E.T Code の受信先URL（RenderまたはローカルのURL）
-ET_CODE_ENDPOINT = os.environ.get("ET_CODE_ENDPOINT", "https://et-code.onrender.com/receive-code")
+def send_code_to_et(filename: str, code: str):
+    endpoint = os.environ.get("ET_CODE_ENDPOINT")
+    if not endpoint:
+        raise EnvironmentError("ET_CODE_ENDPOINT is not set in environment variables.")
 
-# 送信するファイルのパス（例: scripts/sample.py）
-FILE_TO_SEND = "scripts/sample.py"
+    payload = {
+        "filename": filename,
+        "code": code
+    }
 
-def send_code():
     try:
-        filename = os.path.basename(FILE_TO_SEND)
-
-        with open(FILE_TO_SEND, "r", encoding="utf-8") as f:
-            code = f.read()
-
-        payload = {
-            "filename": filename,
-            "code": code
-        }
-
-        response = requests.post(ET_CODE_ENDPOINT, json=payload)
-
-        print("送信完了:", response.status_code)
-        print("レスポンス:", response.text)
-
+        response = requests.post(endpoint, json=payload)
+        response.raise_for_status()
+        print(f"[✅] 送信成功: {response.json()}")
     except Exception as e:
-        print("送信失敗:", str(e))
+        print(f"[❌] 送信エラー: {e}")
 
+# 例：実行
 if __name__ == "__main__":
-    send_code()
+    # ここは任意のテストコードに差し替えてください
+    sample_code = "print('Hello from 八咫烏!')"
+    send_code_to_et("hello_et.py", sample_code)
