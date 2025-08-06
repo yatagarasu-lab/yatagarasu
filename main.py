@@ -70,11 +70,11 @@ def analyze_dropbox_file_with_gpt(file_path: str):
 
 
 # ========================
-# 🌐 Webhookエンドポイント
+# 🌐 LINE Webhookエンドポイント
 # ========================
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
 
     try:
@@ -82,6 +82,16 @@ def callback():
     except InvalidSignatureError:
         abort(400)
     return 'OK'
+
+
+# ========================
+# 🌐 外部中継用エンドポイント（八咫烏などから転送される）
+# ========================
+@app.route("/receive", methods=["POST"])
+def receive():
+    payload = request.get_json(force=True)
+    print("📦 受信した中継データ（八咫烏など）:", payload)
+    return "✅ 受信完了", 200
 
 
 # ========================
