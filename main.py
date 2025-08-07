@@ -27,7 +27,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 openai.api_key = OPENAI_API_KEY
 
 # --- 定数 ---
-DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
+DROPBOX_FOLDER_PATH = "/"  # Dropboxのルートディレクトリ
 processed_hashes = set()
 
 # --- ファイル一覧取得 ---
