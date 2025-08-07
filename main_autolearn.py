@@ -1,59 +1,45 @@
 import os
 import dropbox
 import openai
-import time
+import requests
 
-# --- 認証情報 ---
+# --- 環境変数 ---
 DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
 DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+TARGET_UPDATE_URL = os.environ.get("MAIN_UPDATE_URL")  # ← main.py の /update-code URL
 
 # --- 初期化 ---
 openai.api_key = OPENAI_API_KEY
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
 
-def get_dropbox():
-    return dropbox.Dropbox(
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET
-    )
-
-dbx = get_dropbox()
-
-# --- Dropbox フォルダ設定 ---
-FOLDER_PATH = "/Apps/slot-data-analyzer"
-
-# --- GPT解析処理 ---
-def analyze_file(filename, content):
-    prompt = f"以下のファイル内容を要約・分析し、スロット設定の予測や重要なポイントを抽出してください。\n\n{content}"
+# --- Dropboxからコード読み込み ---
+def get_latest_code_from_dropbox(filename="new_main.py"):
     try:
-        res = openai.ChatCompletion.create(
-            model="gpt-4-1106-preview",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=3000
-        )
-        return res.choices[0].message.content.strip()
+        _, res = dbx.files_download(f"/{filename}")
+        return res.content.decode("utf-8")
     except Exception as e:
-        return f"❌ GPT解析エラー: {e}"
+        print(f"❌ Dropbox読み込み失敗: {e}")
+        return None
 
-# --- メイン自動学習処理 ---
-def auto_learn():
+# --- main.py をアップデート ---
+def update_main_code(new_code):
     try:
-        result = dbx.files_list_folder(FOLDER_PATH)
-        for entry in result.entries:
-            if isinstance(entry, dropbox.files.FileMetadata):
-                path = entry.path_display
-                _, res = dbx.files_download(path)
-                content = res.content.decode("utf-8")
-
-                print(f"\n📄 {entry.name} の内容を解析中...")
-                analysis = analyze_file(entry.name, content)
-                print(f"✅ 解析結果:\n{analysis}")
-                time.sleep(1)  # GPT連続呼び出し対策
+        res = requests.post(TARGET_UPDATE_URL, data=new_code.encode("utf-8"))
+        if res.status_code == 200:
+            print("✅ main.py にアップデート成功")
+        else:
+            print(f"❌ main.py アップデート失敗: {res.text}")
     except Exception as e:
-        print(f"❌ 自動学習中にエラー: {e}")
+        print(f"❌ アップデート通信エラー: {e}")
 
+# --- 実行 ---
 if __name__ == "__main__":
-    auto_learn()
+    code = get_latest_code_from_dropbox("new_main.py")
+    if code:
+        update_main_code(code)
