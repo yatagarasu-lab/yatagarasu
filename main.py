@@ -6,24 +6,7 @@ import openai
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import hashlib
-# main.py のどこか上部
-from github_utils import commit_text
-
-# ...既存コードは触らない...
-
-@app.route("/push-github", methods=["POST"])
-def push_github():
-    try:
-        # 例：直近の状況を簡易ログにしてコミット
-        summary = "Auto update: service heartbeat and last-run OK\n"
-        msg = commit_text(
-            repo_path="ops/last_run.log",
-            text=summary,
-            commit_message="chore: auto heartbeat push"
-        )
-        return msg, 200
-    except Exception as e:
-        return f"❌ GitHub push failed: {e}", 500
+from github_utils import commit_text  # 🔹GitHubユーティリティ
 
 # --- 環境変数 ---
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
@@ -44,14 +27,30 @@ dbx = dropbox.Dropbox(
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 openai.api_key = OPENAI_API_KEY
 
+# --- GitHub への手動ハートビート用エンドポイント ---
+@app.route("/push-github", methods=["POST"])
+def push_github():
+    try:
+        summary = "Auto update: service heartbeat and last-run OK\n"
+        msg = commit_text(
+            repo_path="ops/last_run.log",
+            text=summary,
+            commit_message="chore: auto heartbeat push"
+        )
+        return msg, 200
+    except Exception as e:
+        return f"❌ GitHub push failed: {e}", 500
+
 # --- 定数 ---
-DROPBOX_FOLDER_PATH = ""  # Dropboxのルートディレクトリ
+DROPBOX_FOLDER_PATH = ""  # ルート監視（フルDropbox想定）
 processed_hashes = set()
 
 # --- ファイル一覧取得 ---
 def list_files(folder_path=DROPBOX_FOLDER_PATH):
     try:
-        result = dbx.files_list_folder(folder_path)
+        # ルートは空文字を要求するDropbox API仕様に合わせる
+        folder = folder_path if folder_path != "/" else ""
+        result = dbx.files_list_folder(folder)
         return result.entries
     except Exception as e:
         print(f"[ファイル一覧取得エラー] {e}")
@@ -97,17 +96,25 @@ def process_new_files():
     files = list_files()
     for entry in files:
         fname = entry.name
-        path = f"{DROPBOX_FOLDER_PATH}/{fname}"
+        # ルート監視時も必ず "/filename" にする
+        if DROPBOX_FOLDER_PATH in ("", "/"):
+            path = f"/{fname}"
+        else:
+            path = f"{DROPBOX_FOLDER_PATH.rstrip('/')}/{fname}"
+
         content = download_file(path)
         if not content:
             continue
+
         h = file_hash(content)
         if h in processed_hashes:
             print(f"重複 → {fname}")
             continue
+
         processed_hashes.add(h)
         try:
             summary = analyze_file_with_gpt(fname, content)
+            # ※今は通知する仕様のまま。不要ならここをコメントアウト
             send_line(f"【要約】{fname}\n{summary}")
         except Exception as e:
             print(f"[ファイル処理失敗] {fname} | {e}")
