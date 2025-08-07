@@ -56,7 +56,7 @@ def analyze_file_with_gpt(filename, content):
 def send_line(text):
     try:
         msg = TextSendMessage(text=text)
-        line_bot_api.push_message(LINE_USER_ID, texts=[text])
+        line_bot_api.push_message(LINE_USER_ID, messages=msg)
     except Exception as e:
         print(f"[LINE通知失敗] {e}")
 
@@ -83,8 +83,13 @@ def process_new_files():
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return request.args.get("challenge"), 200
-    else:
+        challenge = request.args.get("challenge")
+        if challenge:
+            print("[Webhook認証] challenge を返します")
+            return challenge, 200
+        return "No challenge", 400
+
+    if request.method == "POST":
         print("Webhook受信")
         process_new_files()
         # 相互アップデート通知
