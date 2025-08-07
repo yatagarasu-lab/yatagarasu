@@ -31,9 +31,9 @@ DROPBOX_FOLDER_PATH = "/"  # Dropboxのルートディレクトリ
 processed_hashes = set()
 
 # --- ファイル一覧取得 ---
-def list_files(path=DROPBOX_FOLDER_PATH):
+def list_files(folder_path=DROPBOX_FOLDER_PATH):
     try:
-        result = dbx.files_list_folder(path)
+        result = dbx.files_list_folder(folder_path)
         return result.entries
     except Exception as e:
         print(f"[ファイル一覧取得エラー] {e}")
