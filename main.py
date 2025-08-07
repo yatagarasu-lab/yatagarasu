@@ -1,81 +1,113 @@
-import os
-import dropbox
 from flask import Flask, request
+import os
+import requests
+import dropbox
+import openai
+from linebot import LineBotApi
+from linebot.models import TextSendMessage
+import hashlib
 
-# 環境変数からDropboxの認証情報取得
-DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET")
-DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN")
+# --- 環境変数 ---
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
+PARTNER_UPDATE_URL = os.getenv("PARTNER_UPDATE_URL")
 
-# Flaskアプリ作成
+# --- 初期化処理 ---
 app = Flask(__name__)
+dbx = dropbox.Dropbox(
+    oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
+    app_key=DROPBOX_APP_KEY,
+    app_secret=DROPBOX_APP_SECRET
+)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+openai.api_key = OPENAI_API_KEY
 
-# Dropboxセッション初期化
-def get_dropbox():
-    return dropbox.Dropbox(
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN,
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET
-    )
-
-dbx = get_dropbox()
-
-# ファイル一覧取得（ルートフォルダ）
-def list_files():
+# --- ファイル一覧取得 ---
+def list_files(path=""):
     try:
-        res = dbx.files_list_folder(path="")
-        return [entry.name for entry in res.entries]
-    except Exception as e:
-        return [f"❌ Dropbox一覧取得エラー: {e}"]
+        result = dbx.files_list_folder(path)
+        return [entry.name for entry in result.entries]
+    except Exception:
+        return []
 
-# 自動フォルダ作成処理（初期セットアップ）
-def create_auto_folders():
-    folders = [
-        "/AutoCollected",
-        "/AutoParsed",
-        "/Logs",
-        "/Screenshots",
-        "/AI"
-    ]
-    created = []
-    for path in folders:
-        try:
-            dbx.files_create_folder_v2(path)
-            created.append(f"📁 作成: {path}")
-        except dropbox.exceptions.ApiError as e:
-            if "conflict" in str(e).lower():
-                created.append(f"✅ 既に存在: {path}")
-            else:
-                created.append(f"❌ 作成失敗: {path} - {e}")
-    return created
+# --- ファイルダウンロード ---
+def download_file(path):
+    _, res = dbx.files_download(path)
+    return res.content
 
-# Webhookエンドポイント
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    payload = request.get_json()
-    print("📦 Webhook payload received:", payload)
-
-    # Dropboxにログとして保存
+# --- 要約生成 ---
+def analyze_file_with_gpt(filename, content):
+    prompt = f"以下を要約してください:\n\n{content.decode('utf-8', errors='ignore')}"
     try:
-        log_content = str(payload).encode("utf-8")
-        filename = f"/Logs/webhook_log.txt"
-        dbx.files_upload(log_content, filename, mode=dropbox.files.WriteMode.overwrite)
-        return "✅ Webhook received and logged", 200
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5
+        )
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"❌ 保存エラー: {e}", 500
+        return f"[GPT要約失敗] {e}"
 
-# 状態確認用エンドポイント
-@app.route("/", methods=["GET"])
-def index():
+# --- LINE 通知 ---
+def send_line(text):
+    try:
+        msg = TextSendMessage(text=text)
+        line_bot_api.push_message(LINE_USER_ID, texts=[text])
+    except Exception as e:
+        print(f"[LINE通知失敗] {e}")
+
+# --- Hash重複チェックベース ---
+processed_hashes = set()
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
+
+# --- 本番処理 ---
+def process_new_files():
     files = list_files()
-    return "<h2>✅ Yatagarasu 自動解析BOT 起動中</h2>" + "<br>".join(files)
+    for fname in files:
+        path = f"/{fname}"
+        content = download_file(path)
+        h = file_hash(content)
+        if h in processed_hashes:
+            print(f"重複 → {fname}")
+            continue
+        processed_hashes.add(h)
+        summary = analyze_file_with_gpt(fname, content)
+        send_line(f"【要約】{fname}\n{summary}")
 
-# 自動フォルダ作成エンドポイント（初期化用）
-@app.route("/init", methods=["GET"])
-def init():
-    result = create_auto_folders()
-    return "<h2>📁 フォルダ初期化結果:</h2><pre>" + "\n".join(result) + "</pre>"
+# --- Webhookエンドポイント（Dropbox用） ---
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return request.args.get("challenge"), 200
+    else:
+        print("Webhook受信")
+        process_new_files()
+        # 相互アップデート通知
+        if PARTNER_UPDATE_URL:
+            try:
+                requests.post(PARTNER_UPDATE_URL, timeout=3)
+                print("相手にも update-code 通知送信済")
+            except Exception as e:
+                print(f"[通知送信エラー] {e}")
+        return "", 200
 
-# Flask起動
+# --- update-code 受信エンドポイント ---
+@app.route("/update-code", methods=["POST"])
+def update_code():
+    print("Updateコード受信")
+    process_new_files()
+    return "OK", 200
+
+# --- ステータス確認用 ---
+@app.route("/", methods=["GET"])
+def home():
+    files = list_files()
+    return "<h2>八咫烏 BOT 起動中</h2>" + "<br>".join(files)
+
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0", port=10000)
