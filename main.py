@@ -26,18 +26,31 @@ dbx = dropbox.Dropbox(
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 openai.api_key = OPENAI_API_KEY
 
+# --- グローバル変数 ---
+DROPBOX_FOLDER_PATH = "/Apps/slot-data-analyzer"
+processed_hashes = set()
+
 # --- ファイル一覧取得 ---
-def list_files(path=""):
+def list_files(path=DROPBOX_FOLDER_PATH):
     try:
         result = dbx.files_list_folder(path)
-        return [entry.name for entry in result.entries]
-    except Exception:
+        return result.entries
+    except Exception as e:
+        print(f"[ファイル一覧取得エラー] {e}")
         return []
 
 # --- ファイルダウンロード ---
 def download_file(path):
-    _, res = dbx.files_download(path)
-    return res.content
+    try:
+        _, res = dbx.files_download(path)
+        return res.content
+    except Exception as e:
+        print(f"[ファイルDLエラー] {e}")
+        return None
+
+# --- ハッシュ生成 ---
+def file_hash(content):
+    return hashlib.sha256(content).hexdigest()
 
 # --- 要約生成 ---
 def analyze_file_with_gpt(filename, content):
@@ -60,17 +73,15 @@ def send_line(text):
     except Exception as e:
         print(f"[LINE通知失敗] {e}")
 
-# --- Hash重複チェックベース ---
-processed_hashes = set()
-def file_hash(content):
-    return hashlib.sha256(content).hexdigest()
-
-# --- 本番処理 ---
+# --- ファイル処理本体 ---
 def process_new_files():
     files = list_files()
-    for fname in files:
-        path = f"/{fname}"
+    for entry in files:
+        fname = entry.name
+        path = f"{DROPBOX_FOLDER_PATH}/{fname}"
         content = download_file(path)
+        if not content:
+            continue
         h = file_hash(content)
         if h in processed_hashes:
             print(f"重複 → {fname}")
@@ -79,7 +90,7 @@ def process_new_files():
         summary = analyze_file_with_gpt(fname, content)
         send_line(f"【要約】{fname}\n{summary}")
 
-# --- Webhookエンドポイント（Dropbox用） ---
+# --- Dropbox Webhook受信 ---
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -92,11 +103,10 @@ def webhook():
     if request.method == "POST":
         print("Webhook受信")
         process_new_files()
-        # 相互アップデート通知
         if PARTNER_UPDATE_URL:
             try:
                 requests.post(PARTNER_UPDATE_URL, timeout=3)
-                print("相手にも update-code 通知送信済")
+                print("相手に update-code 通知送信済")
             except Exception as e:
                 print(f"[通知送信エラー] {e}")
         return "", 200
@@ -112,7 +122,8 @@ def update_code():
 @app.route("/", methods=["GET"])
 def home():
     files = list_files()
-    return "<h2>八咫烏 BOT 起動中</h2>" + "<br>".join(files)
+    return "<h2>八咫烏 BOT 起動中</h2><br>" + "<br>".join([f.name for f in files])
 
+# --- 実行 ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
