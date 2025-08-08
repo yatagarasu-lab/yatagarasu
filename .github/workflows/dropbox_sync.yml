@@ -3,46 +3,204 @@ name: Dropbox Sync
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"  # 30分おき（必要に応じて変えてOK）
+    - cron: "*/30 * * * *"   # 30分おき（必要に応じて調整）
+
+permissions:
+  contents: write
 
 jobs:
   dropbox-sync:
     runs-on: ubuntu-latest
 
+    env:
+      # 必須（Secrets）
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+      GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
+
+      # 任意（Variables）
+      TARGET_REPO:           ${{ vars.TARGET_REPO }}         # 例: yatagarasu-lab/yatagarasu
+      TARGET_BRANCH:         ${{ vars.TARGET_BRANCH || 'main' }}
+      DROPBOX_FOLDER:        ${{ vars.DROPBOX_FOLDER }}      # 例: /inbox  未設定ならルート
+      RUN_MODE:              ${{ vars.RUN_MODE || 'safe' }}  # future use
+
+      # 作業ディレクトリ
+      SYNC_DIR:              data/dropbox
+      STATE_FILE:            ops/dropbox_state.json
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # 既存の短い名前でOK
+          fetch-depth: 0
 
-      - name: Setup Python
+      - name: Validate required secrets/vars
+        run: |
+          set -e
+          miss=0
+          for k in DROPBOX_REFRESH_TOKEN DROPBOX_APP_KEY DROPBOX_APP_SECRET GITHUB_TOKEN; do
+            if [ -z "${!k}" ]; then
+              echo "::error title=Missing secret::$k is empty"
+              miss=1
+            fi
+          done
+          if [ -z "${TARGET_BRANCH}" ]; then
+            echo "::error title=Missing var::TARGET_BRANCH is empty"
+            miss=1
+          fi
+          [ "$miss" = "0" ] || exit 1
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Install deps
         run: |
-          pip install dropbox
+          python -m pip install --upgrade pip
+          pip install dropbox chardet
 
-      - name: Run Dropbox sync
-        env:
-          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          DROPBOX_APP_KEY:      ${{ secrets.DROPBOX_APP_KEY }}
-          DROPBOX_APP_SECRET:   ${{ secrets.DROPBOX_APP_SECRET }}
-          SYNC_DIR:             dropbox_sync         # 取り込み先フォルダ（リポジトリ内）
-          DROPBOX_FOLDER:       /                    # 監視元（例: / or /inbox）
+      - name: Sync from Dropbox -> ${{ env.SYNC_DIR }}
+        id: sync
+        shell: bash
         run: |
-          python sync_from_dropbox.py
+          set -euo pipefail
+          mkdir -p "${SYNC_DIR}" "$(dirname "${STATE_FILE}")"
 
-      - name: Commit & Push if changed
+          python - <<'PY' > sync.log
+          import os, json, hashlib, sys, pathlib, time
+          import dropbox
+
+          REFRESH = os.environ["DROPBOX_REFRESH_TOKEN"]
+          APP_KEY = os.environ["DROPBOX_APP_KEY"]
+          APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
+          FOLDER = os.environ.get("DROPBOX_FOLDER") or ""
+          SYNC_DIR = os.environ["SYNC_DIR"]
+          STATE_FILE = os.environ["STATE_FILE"]
+
+          def safe_path(name: str) -> str:
+            p = name.lstrip("/").replace("..","_")
+            return str(pathlib.Path(SYNC_DIR) / p)
+
+          # load state
+          state = {}
+          if os.path.exists(STATE_FILE):
+            try:
+              with open(STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            except Exception:
+              state = {}
+
+          dbx = dropbox.Dropbox(
+              oauth2_refresh_token=REFRESH,
+              app_key=APP_KEY,
+              app_secret=APP_SECRET
+          )
+
+          changed = False
+          touched = set()
+
+          def handle_entries(entries):
+            nonlocal changed
+            for e in entries:
+              if isinstance(e, dropbox.files.FileMetadata):
+                path = e.path_lower
+                dest = safe_path(path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                rev = e.rev
+                old = state.get(path, {})
+                if old.get("rev") == rev:
+                  touched.add(path)
+                  continue
+                # download
+                try:
+                  md, res = dbx.files_download(path)
+                  content = res.content
+                except Exception as ex:
+                  print(f"[WARN] download failed: {path}: {ex}")
+                  continue
+                with open(dest, "wb") as f:
+                  f.write(content)
+                state[path] = {"rev": rev, "size": e.size, "ts": int(time.time())}
+                touched.add(path)
+                changed = True
+                print(f"[UPDATE] {path} -> {dest}")
+              elif isinstance(e, dropbox.files.FolderMetadata):
+                d = safe_path(e.path_lower)
+                os.makedirs(d, exist_ok=True)
+              else:
+                # deleted or unknown types will be cleaned later
+                pass
+
+          # list & download (paged)
+          try:
+            res = dbx.files_list_folder(FOLDER)
+            handle_entries(res.entries)
+            while res.has_more:
+              res = dbx.files_list_folder_continue(res.cursor)
+              handle_entries(res.entries)
+          except Exception as ex:
+            print(f"::error title=Dropbox list failed::{ex}")
+            sys.exit(1)
+
+          # clean removed files (present in state but not touched anymore)
+          removed = []
+          for path in list(state.keys()):
+            if path not in touched:
+              local = safe_path(path)
+              if os.path.exists(local):
+                try:
+                  os.remove(local)
+                  removed.append(local)
+                except Exception: pass
+              state.pop(path, None)
+              changed = True
+              print(f"[DELETE] {local}")
+
+          # persist state
+          with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+          print(f"CHANGED={changed}")
+          PY
+
+          cat sync.log
+          if grep -q "CHANGED=True" sync.log; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare git (actor)
+        run: |
+          git config user.name  "auto-sync-bot"
+          git config user.email "auto-sync-bot@users.noreply.github.com"
+
+      - name: Commit changes (if any)
+        if: steps.sync.outputs.changed == 'true'
         run: |
           set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
-            git commit -m "chore(sync): Dropbox → repo ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
-            git push origin ${{ github.ref_name }}
-          else
-            echo "No changes."
-          fi
+          git add -A
+          git commit -m "chore(sync): mirror from Dropbox to ${SYNC_DIR} [skip ci]" || echo "nothing to commit"
+
+      - name: Push to same repo
+        if: steps.sync.outputs.changed == 'true' && (env.TARGET_REPO == '' || env.TARGET_REPO == github.repository)
+        run: |
+          set -e
+          git push origin "${TARGET_BRANCH}"
+
+      - name: Push to TARGET_REPO
+        if: steps.sync.outputs.changed == 'true' && env.TARGET_REPO != '' && env.TARGET_REPO != github.repository
+        env:
+          REPO_URL: https://x-access-token:${{ env.GITHUB_TOKEN }}@github.com/${{ env.TARGET_REPO }}.git
+        run: |
+          set -e
+          git fetch origin "${TARGET_BRANCH}"
+          git branch -M "${TARGET_BRANCH}"
+          git remote add mirror "${REPO_URL}" || git remote set-url mirror "${REPO_URL}"
+          git push mirror "${TARGET_BRANCH}"
+
+      - name: No change
+        if: steps.sync.outputs.changed != 'true'
+        run: echo "No Dropbox changes. Nothing to commit."
