@@ -7,6 +7,9 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import hashlib
 from threading import Thread
+from datetime import datetime, timezone
+
+# 使ってなければ github_utils 自体は残してOK（失敗しても握りつぶす）
 from github_utils import commit_text  # 使ってなければ残してOK
 
 # --- 環境変数 ---
@@ -35,6 +38,28 @@ oai = OpenAI(api_key=OPENAI_API_KEY)
 @app.route("/healthz", methods=["GET"])
 def healthz():
     return "ok", 200
+
+# --- GitHub last_run ログ更新（失敗しても落とさない） ---
+def commit_last_run(note: str = "heartbeat") -> str:
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+        body = f"[{ts}] {note}\n"
+        msg = commit_text(
+            repo_path="ops/last_run.log",
+            text=body,
+            commit_message=f"chore: {note}"
+        )
+        print(f"[GitHub] last_run.log updated: {msg}")
+        return msg
+    except Exception as e:
+        print(f"[GitHub更新スキップ] {e}")
+        return f"skip: {e}"
+
+# 手動で heartbeat を叩きたい時用（任意）
+@app.route("/push-github", methods=["POST"])
+def push_github():
+    msg = commit_last_run("manual-ping")
+    return msg, 200
 
 # --- 定数 ---
 DROPBOX_FOLDER_PATH = ""   # ルート監視（Dropboxは空文字が正）
@@ -126,6 +151,9 @@ def _handle_async():
                 print(f"[通知送信エラー] {e}")
     except Exception as e:
         print(f"[非同期処理エラー] {e}")
+    finally:
+        # 処理完了の heartbeat
+        commit_last_run("webhook-processed")
 
 # --- Dropbox Webhook ---
 @app.route("/webhook", methods=["GET", "POST"])
@@ -158,5 +186,7 @@ def home():
 
 # --- 起動 ---
 if __name__ == "__main__":
+    # 起動時に一度 heartbeat（ファイル未作成でも自動で作られる）
+    commit_last_run("service-start")
     port = int(os.getenv("PORT", "10000"))   # Render/ローカル両対応
     app.run(host="0.0.0.0", port=port)
