@@ -1,70 +1,68 @@
-name: Auto-update & Deploy
+name: Auto Update & Deploy
 
 on:
-  workflow_dispatch:          # 手動でも走らせられる
+  push:
+    branches: [ "main" ]
+    # 画像やREADMEだけの変更では走らないようにしたい場合は下を有効化
+    # paths-ignore:
+    #   - "**/*.md"
+    #   - "**/*.png"
+    #   - "**/*.jpg"
+  workflow_dispatch: {}     # 手動実行ボタン
   schedule:
-    - cron: "*/30 * * * *"    # 30分ごと。最短で回したいなら */10 などに
+    - cron: "0 */6 * * *"   # 6時間に1回ヘルスチェック的に回す（任意）
 
-permissions:
-  contents: write
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  update:
+  build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Run auto pipeline
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies (if requirements.txt exists)
+        if: hashFiles('**/requirements.txt') != ''
         run: |
-          python - << 'PY'
-          import os, pathlib, datetime, requests, sys
-          ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
-          (ROOT / "ops").mkdir(parents=True, exist_ok=True)
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-          # 1) ハートビートを書き込み（コミット用の差分）
-          ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-          (ROOT / "ops" / "last_run.log").write_text(f"{ts} - heartbeat\n", encoding="utf-8")
-
-          # 2) 稼働中2サービスへ“自己処理トリガー”を投げる
-          #    必要ならここに自動収集や自動学習の追加APIコールを拡張
-          urls = [
-              "https://e-t-code.onrender.com/update-code",
-              "https://yatagarasu-bot.onrender.com/update-code",
-          ]
-          ok = True
-          for u in urls:
-              try:
-                  r = requests.post(u, timeout=6)
-                  print(u, r.status_code)
-                  if r.status_code >= 400:
-                      ok = False
-              except Exception as e:
-                  print("ERR", u, e)
-                  ok = False
-
-          # 失敗はCIを落とさない（継続運用優先）
-          sys.exit(0)
-          PY
-
-      - name: Commit changes (if any)
+      # 任意: テストがあれば実行（なければスキップ）
+      - name: Run tests (if tests/ exists)
+        if: hashFiles('tests/**') != ''
         run: |
-          git config user.name  "auto-bot"
-          git config user.email "auto-bot@users.noreply.github.com"
-          git add -A
-          git commit -m "chore: auto update (heartbeat)" || echo "No changes to commit"
-          git push
+          python -m pytest -q
 
-  # Render は「pushで自動デプロイ」がONならこのジョブは不要です
-  # OFFの場合や確実に叩きたいときだけ、Secretsに RENDER_DEPLOY_HOOK を入れて使う
-  deploy:
-    needs: update
-    if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render deploy hook
-        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+      - name: Trigger Render deploy (via Deploy Hook)
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "❌ RENDER_DEPLOY_HOOK is not set"; exit 1
+          fi
+          echo "🚀 Triggering Render deploy…"
+          # リトライ付き
+          for i in 1 2 3; do
+            code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" -X POST "$HOOK") || true
+            echo "HTTP $code"
+            test "$code" = "200" && break
+            echo "Retrying in 10s…"; sleep 10
+          done
+          echo "Response:"; tail -c 1000 /tmp/resp.txt
+          test "$code" = "200" || (echo "Deploy hook failed" && exit 1)
