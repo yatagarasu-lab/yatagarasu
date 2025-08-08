@@ -3,31 +3,46 @@ name: Dropbox Sync
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *" # 30分おき
+    - cron: "*/30 * * * *"  # 30分おき（必要に応じて変えてOK）
 
 jobs:
   dropbox-sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}  # 既存の短い名前でOK
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          pip install dropbox requests
+          pip install dropbox
 
-      - name: Run sync script
+      - name: Run Dropbox sync
         env:
           DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-          DROPBOX_CLIENT_ID: ${{ secrets.DROPBOX_CLIENT_ID }}
-          DROPBOX_CLIENT_SECRET: ${{ secrets.DROPBOX_CLIENT_SECRET }}
-          TARGET_REPO: ${{ secrets.TARGET_REPO }}
-          TARGET_BRANCH: ${{ secrets.TARGET_BRANCH }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DROPBOX_APP_KEY:      ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:   ${{ secrets.DROPBOX_APP_SECRET }}
+          SYNC_DIR:             dropbox_sync         # 取り込み先フォルダ（リポジトリ内）
+          DROPBOX_FOLDER:       /                    # 監視元（例: / or /inbox）
         run: |
           python sync_from_dropbox.py
+
+      - name: Commit & Push if changed
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(sync): Dropbox → repo ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+            git push origin ${{ github.ref_name }}
+          else
+            echo "No changes."
+          fi
