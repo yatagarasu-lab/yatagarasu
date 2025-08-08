@@ -1,76 +1,59 @@
-name: Patch main & deploy
+name: Auto patch & deploy
 
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "override RUN_MODE (normal|fast)"
-        required: false
-        default: ""
   schedule:
-    # fast 用: 5分おき（RUN_MODE=fast のときだけ実行）
-    - cron: "*/5 * * * *"
-    # normal 用: 30分おき（RUN_MODE=normal のときだけ実行）
-    - cron: "*/30 * * * *"
+    # 2時間おきに自動強化（必要なら後でここだけ変えればOK）
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # ← これが大事（自動コミット用）
 
 jobs:
-  patch:
+  autopatch:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read RUN_MODE
-        id: readmode
-        run: |
-          echo "run_mode=${{ secrets.RUN_MODE }}" >> $GITHUB_OUTPUT
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
 
-      - name: Determine execution
-        id: should_run
+      - name: Run auto patch
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # なくてもOK（無ければハートビートのみ）
         run: |
-          MODE_INPUT="${{ github.event.inputs.mode }}"
-          if [ -n "$MODE_INPUT" ]; then
-            CURRENT_MODE="$MODE_INPUT"
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+          python tools/auto_patch.py
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(auto): autopatch & heartbeat"
+            git push
+            echo "changes_pushed=true" >> $GITHUB_OUTPUT
           else
-            CURRENT_MODE="${{ steps.readmode.outputs.run_mode }}"
-          fi
-          echo "Current mode: $CURRENT_MODE"
-
-          if [ "$CURRENT_MODE" != "fast" ] && [ "$CURRENT_MODE" != "normal" ]; then
-            echo "Invalid or unset RUN_MODE. Skipping..."
-            echo "run=false" >> $GITHUB_OUTPUT
-            exit 0
+            echo "No changes."
           fi
 
-          # cron実行時のモードチェック
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            if [ "$CURRENT_MODE" = "fast" ] && [ "$(date +\%M)" -a "$(expr $(date +\%M) % 5)" != "0" ]; then
-              echo "Skipping: Not 5-min mark"
-              echo "run=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            if [ "$CURRENT_MODE" = "normal" ] && [ "$(date +\%M)" -a "$(expr $(date +\%M) % 30)" != "0" ]; then
-              echo "Skipping: Not 30-min mark"
-              echo "run=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-
-          echo "run=true" >> $GITHUB_OUTPUT
-
-      - name: Apply patch
-        if: steps.should_run.outputs.run == 'true'
+      - name: Trigger Render deploy (optional)
+        if: always()
+        env:
+          RENDER_DEPLOY_HOOK:        ${{ secrets.RENDER_DEPLOY_HOOK }}
+          YATAGARASU_DEPLOY_HOOK:    ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
+          E_T_CODE_DEPLOY_HOOK:      ${{ secrets.E_T_CODE_DEPLOY_HOOK }}
         run: |
-          echo "Applying automated changes..."
-          # ここに main.py などを自動更新する処理を記述
-          # 例:
-          echo "# Auto-patched at $(date)" >> auto_patch_log.txt
-
-      - name: Commit & push changes
-        if: steps.should_run.outputs.run == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "Auto patch at $(date)"
-          git push
+          set -e
+          URL="${RENDER_DEPLOY_HOOK:-${YATAGARASU_DEPLOY_HOOK:-$E_T_CODE_DEPLOY_HOOK}}"
+          if [ -n "$URL" ]; then
+            echo "POST $URL"
+            curl -fsSL -X POST "$URL" || true
+          else
+            echo "No deploy hook configured. Skipping."
+          fi
