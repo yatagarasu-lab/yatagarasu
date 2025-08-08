@@ -1,68 +1,54 @@
-name: Auto Update & Deploy
+name: Auto update and Deploy
 
 on:
   push:
-    branches: [ "main" ]
-    # 画像やREADMEだけの変更では走らないようにしたい場合は下を有効化
-    # paths-ignore:
-    #   - "**/*.md"
-    #   - "**/*.png"
-    #   - "**/*.jpg"
-  workflow_dispatch: {}     # 手動実行ボタン
+    branches: [ main ]
+    paths:
+      - "ops/**"
+      - ".github/workflows/**"
+  workflow_dispatch: {}
   schedule:
-    - cron: "0 */6 * * *"   # 6時間に1回ヘルスチェック的に回す（任意）
+    - cron: "0 */3 * * *"  # 3時間ごと（お好みで）
 
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
-  build-and-deploy:
+  apply-and-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install dependencies (if requirements.txt exists)
-        if: hashFiles('**/requirements.txt') != ''
+      - name: Install deps for editor
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pyyaml jinja2
 
-      # 任意: テストがあれば実行（なければスキップ）
-      - name: Run tests (if tests/ exists)
-        if: hashFiles('tests/**') != ''
+      - name: Apply desired changes
         run: |
-          python -m pytest -q
+          python ops/apply_changes.py
 
-      - name: Trigger Render deploy (via Deploy Hook)
-        env:
-          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+      - name: Commit if changed
         run: |
-          if [ -z "$HOOK" ]; then
-            echo "❌ RENDER_DEPLOY_HOOK is not set"; exit 1
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore: auto-apply desired changes"
+            git push
+          else
+            echo "No changes to commit."
           fi
-          echo "🚀 Triggering Render deploy…"
-          # リトライ付き
-          for i in 1 2 3; do
-            code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" -X POST "$HOOK") || true
-            echo "HTTP $code"
-            test "$code" = "200" && break
-            echo "Retrying in 10s…"; sleep 10
-          done
-          echo "Response:"; tail -c 1000 /tmp/resp.txt
-          test "$code" = "200" || (echo "Deploy hook failed" && exit 1)
+
+      - name: Trigger Render deploy (optional)
+        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+        run: |
+          curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}" \
+            && echo "Render deploy triggered."
