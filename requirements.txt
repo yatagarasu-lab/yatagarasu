@@ -23,3 +23,7 @@ python-dotenv
 apscheduler
 requests-oauthlib
 tenacity==8.2.3
+apscheduler==3.10.4
+prometheus-client==0.20.0
+tenacity==8.2.3
+tzlocal==5.2
