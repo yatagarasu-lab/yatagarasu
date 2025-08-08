@@ -2,20 +2,24 @@ from flask import Flask, request
 import os
 import requests
 import dropbox
-import openai
+from openai import OpenAI            # ← v1 クライアント
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import hashlib
-from github_utils import commit_text  # 🔹GitHubユーティリティ
+from threading import Thread
+from github_utils import commit_text  # 使ってなければ残してOK
 
 # --- 環境変数 ---
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DROPBOX_APP_KEY       = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET    = os.getenv("DROPBOX_APP_SECRET")
+OPENAI_API_KEY        = os.getenv("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_USER_ID = os.getenv("LINE_USER_ID")
-PARTNER_UPDATE_URL = os.getenv("PARTNER_UPDATE_URL")
+LINE_USER_ID          = os.getenv("LINE_USER_ID")
+PARTNER_UPDATE_URL    = os.getenv("PARTNER_UPDATE_URL")
+
+# 解析結果のLINE通知 … デフォルトはオフ（"1"でオン）
+NOTIFY_SUMMARY = os.getenv("NOTIFY_SUMMARY", "0") == "1"
 
 # --- 初期化 ---
 app = Flask(__name__)
@@ -25,36 +29,30 @@ dbx = dropbox.Dropbox(
     app_secret=DROPBOX_APP_SECRET
 )
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-openai.api_key = OPENAI_API_KEY
+oai = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- GitHub への手動ハートビート用エンドポイント ---
-@app.route("/push-github", methods=["POST"])
-def push_github():
-    try:
-        summary = "Auto update: service heartbeat and last-run OK\n"
-        msg = commit_text(
-            repo_path="ops/last_run.log",
-            text=summary,
-            commit_message="chore: auto heartbeat push"
-        )
-        return msg, 200
-    except Exception as e:
-        return f"❌ GitHub push failed: {e}", 500
+# --- Health check（Render用） ---
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return "ok", 200
 
 # --- 定数 ---
-DROPBOX_FOLDER_PATH = ""  # ルート監視（フルDropbox想定）
+DROPBOX_FOLDER_PATH = ""   # ルート監視（Dropboxは空文字が正）
 processed_hashes = set()
 
-# --- ファイル一覧取得 ---
+# --- ファイル一覧取得（ページング対応） ---
 def list_files(folder_path=DROPBOX_FOLDER_PATH):
+    entries = []
     try:
-        # ルートは空文字を要求するDropbox API仕様に合わせる
-        folder = folder_path if folder_path != "/" else ""
-        result = dbx.files_list_folder(folder)
-        return result.entries
+        folder = "" if folder_path in ("", "/") else folder_path
+        res = dbx.files_list_folder(folder)
+        entries.extend(res.entries)
+        while res.has_more:
+            res = dbx.files_list_folder_continue(res.cursor)
+            entries.extend(res.entries)
     except Exception as e:
         print(f"[ファイル一覧取得エラー] {e}")
-        return []
+    return entries
 
 # --- ファイルダウンロード ---
 def download_file(path):
@@ -67,25 +65,26 @@ def download_file(path):
 
 # --- ハッシュ作成 ---
 def file_hash(content):
-    if content is None:
-        return ""
-    return hashlib.sha256(content).hexdigest()
+    return hashlib.sha256(content or b"").hexdigest()
 
-# --- 要約処理 ---
-def analyze_file_with_gpt(filename, content):
-    prompt = f"以下を要約してください:\n\n{content.decode('utf-8', errors='ignore')}"
+# --- 要約処理（OpenAI v1 API） ---
+def analyze_file_with_gpt(filename, content: bytes):
+    text = content.decode("utf-8", errors="ignore")
+    prompt = f"以下のテキストを簡潔に日本語で要約してください。\n\n{text}"
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
+        resp = oai.chat.completions.create(
+            model="gpt-4o-mini",        # コスト抑制。必要なら "gpt-4o"
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
+            temperature=0.2
         )
-        return response.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"[GPT要約失敗] {e}"
 
-# --- LINE通知 ---
+# --- LINE通知（フラグで制御） ---
 def send_line(text):
+    if not NOTIFY_SUMMARY:
+        return
     try:
         line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
     except Exception as e:
@@ -96,11 +95,8 @@ def process_new_files():
     files = list_files()
     for entry in files:
         fname = entry.name
-        # ルート監視時も必ず "/filename" にする
-        if DROPBOX_FOLDER_PATH in ("", "/"):
-            path = f"/{fname}"
-        else:
-            path = f"{DROPBOX_FOLDER_PATH.rstrip('/')}/{fname}"
+        path = f"/{fname}" if DROPBOX_FOLDER_PATH in ("", "/") \
+               else f"{DROPBOX_FOLDER_PATH.rstrip('/')}/{fname}"
 
         content = download_file(path)
         if not content:
@@ -110,14 +106,26 @@ def process_new_files():
         if h in processed_hashes:
             print(f"重複 → {fname}")
             continue
-
         processed_hashes.add(h)
+
         try:
             summary = analyze_file_with_gpt(fname, content)
-            # ※今は通知する仕様のまま。不要ならここをコメントアウト
             send_line(f"【要約】{fname}\n{summary}")
         except Exception as e:
             print(f"[ファイル処理失敗] {fname} | {e}")
+
+# --- 非同期実行（Dropboxの10秒タイムアウト回避） ---
+def _handle_async():
+    try:
+        process_new_files()
+        if PARTNER_UPDATE_URL:
+            try:
+                requests.post(PARTNER_UPDATE_URL, timeout=3)
+                print("相手にも update-code 通知送信済")
+            except Exception as e:
+                print(f"[通知送信エラー] {e}")
+    except Exception as e:
+        print(f"[非同期処理エラー] {e}")
 
 # --- Dropbox Webhook ---
 @app.route("/webhook", methods=["GET", "POST"])
@@ -129,22 +137,16 @@ def webhook():
             return challenge, 200
         return "No challenge", 400
 
-    if request.method == "POST":
-        print("[Webhook POST受信]")
-        process_new_files()
-        if PARTNER_UPDATE_URL:
-            try:
-                requests.post(PARTNER_UPDATE_URL, timeout=3)
-                print("相手にも update-code 通知送信済")
-            except Exception as e:
-                print(f"[通知送信エラー] {e}")
-        return "", 200
+    # POSTはすぐ200を返して裏で処理
+    print("[Webhook POST受信] 非同期処理開始")
+    Thread(target=_handle_async, daemon=True).start()
+    return "", 200
 
 # --- 外部からの更新トリガー ---
 @app.route("/update-code", methods=["POST"])
 def update_code():
-    print("[Update-code 受信]")
-    process_new_files()
+    print("[Update-code 受信] 非同期処理開始")
+    Thread(target=_handle_async, daemon=True).start()
     return "OK", 200
 
 # --- ステータス表示 ---
@@ -156,4 +158,5 @@ def home():
 
 # --- 起動 ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.getenv("PORT", "10000"))   # Render/ローカル両対応
+    app.run(host="0.0.0.0", port=port)
