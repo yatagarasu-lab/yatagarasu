@@ -1,0 +1,70 @@
+name: Auto-update & Deploy
+
+on:
+  workflow_dispatch:          # 手動でも走らせられる
+  schedule:
+    - cron: "*/30 * * * *"    # 30分ごと。最短で回したいなら */10 などに
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run auto pipeline
+        run: |
+          python - << 'PY'
+          import os, pathlib, datetime, requests, sys
+          ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
+          (ROOT / "ops").mkdir(parents=True, exist_ok=True)
+
+          # 1) ハートビートを書き込み（コミット用の差分）
+          ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+          (ROOT / "ops" / "last_run.log").write_text(f"{ts} - heartbeat\n", encoding="utf-8")
+
+          # 2) 稼働中2サービスへ“自己処理トリガー”を投げる
+          #    必要ならここに自動収集や自動学習の追加APIコールを拡張
+          urls = [
+              "https://e-t-code.onrender.com/update-code",
+              "https://yatagarasu-bot.onrender.com/update-code",
+          ]
+          ok = True
+          for u in urls:
+              try:
+                  r = requests.post(u, timeout=6)
+                  print(u, r.status_code)
+                  if r.status_code >= 400:
+                      ok = False
+              except Exception as e:
+                  print("ERR", u, e)
+                  ok = False
+
+          # 失敗はCIを落とさない（継続運用優先）
+          sys.exit(0)
+          PY
+
+      - name: Commit changes (if any)
+        run: |
+          git config user.name  "auto-bot"
+          git config user.email "auto-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: auto update (heartbeat)" || echo "No changes to commit"
+          git push
+
+  # Render は「pushで自動デプロイ」がONならこのジョブは不要です
+  # OFFの場合や確実に叩きたいときだけ、Secretsに RENDER_DEPLOY_HOOK を入れて使う
+  deploy:
+    needs: update
+    if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy hook
+        run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
