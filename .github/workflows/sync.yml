@@ -1,0 +1,30 @@
+name: Repo Sync
+
+on:
+  workflow_dispatch: # 手動実行用
+  schedule:
+    - cron: "0 * * * *" # 毎時0分に実行（必要に応じて変更）
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.repository }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pull from source
+        run: |
+          git pull origin ${{ secrets.TARGET_BRANCH }}
+
+      - name: Push to target repo
+        run: |
+          git remote add target https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ secrets.TARGET_REPO }}.git
+          git push target ${{ secrets.TARGET_BRANCH }} --force
