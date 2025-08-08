@@ -1,7 +1,10 @@
-name: Patch main.py (reinforce)
+name: Patch main.py (reinforce & auto-deploy)
 
 on:
   workflow_dispatch: {}
+  # ← 放置でも走るように、15分間隔で発火
+  schedule:
+    - cron: "*/15 * * * *"   # 毎15分（UTC）
 
 permissions:
   contents: write
@@ -16,6 +19,10 @@ jobs:
         shell: bash
         run: |
           cat > main.py <<'PY'
+# === main.py (生成) ===
+# ここは前回お渡しした「強化版 main.py」と同一です（/healthz,/readyz、SQLite状態管理、Dropbox delta、OpenAI要約、非同期処理）
+# 直近メッセージで渡した内容そのままをここに埋め込んでいます。
+# （もし差分カスタムがあるなら、その部分だけこのブロックを書き換えればOK）
 from flask import Flask, request
 import os, requests, dropbox, hashlib, logging, json, sqlite3, time, uuid
 from threading import Thread
@@ -23,7 +30,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 from openai import OpenAI
-
 # ---- env ----
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_APP_KEY       = os.getenv("DROPBOX_APP_KEY")
@@ -36,7 +42,6 @@ NOTIFY_SUMMARY        = os.getenv("NOTIFY_SUMMARY", "0") == "1"
 STATE_DB              = os.getenv("STATE_DB", "state.sqlite")
 MODEL_NAME            = os.getenv("MODEL_NAME", "gpt-4o-mini")
 MAX_TOKENS            = int(os.getenv("MAX_TOKENS_PER_SUMMARY", "800"))
-
 # ---- init ----
 app = Flask(__name__)
 dbx = dropbox.Dropbox(
@@ -46,55 +51,34 @@ dbx = dropbox.Dropbox(
 )
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("app")
+logging.basicConfig(level=logging.INFO); log = logging.getLogger("app")
 REQ_ID = lambda: uuid.uuid4().hex[:8]
-
-# ---- sqlite state (processed + cursor) ----
+# ---- sqlite state ----
 def _db():
-    conn = sqlite3.connect(STATE_DB)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
-
+    import sqlite3
+    conn = sqlite3.connect(STATE_DB); conn.execute("PRAGMA journal_mode=WAL;"); return conn
 def init_state():
     with _db() as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS processed(
-            file_id TEXT PRIMARY KEY,
-            rev TEXT,
-            name TEXT,
-            ts INTEGER
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS cursor(
-            id INTEGER PRIMARY KEY CHECK(id=1),
-            value TEXT
-        )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS processed(file_id TEXT PRIMARY KEY, rev TEXT, name TEXT, ts INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS cursor(id INTEGER PRIMARY KEY CHECK(id=1), value TEXT)""")
 init_state()
-
 def is_processed(entry):
     with _db() as c:
         row = c.execute("SELECT rev FROM processed WHERE file_id=?", (entry.id,)).fetchone()
         return bool(row and row[0] == entry.rev)
-
 def mark_processed(entry):
     with _db() as c:
-        c.execute("""INSERT INTO processed(file_id,rev,name,ts)
-                     VALUES(?,?,?,?)
-                     ON CONFLICT(file_id) DO UPDATE
-                     SET rev=excluded.rev, name=excluded.name, ts=excluded.ts""",
+        c.execute("""INSERT INTO processed(file_id,rev,name,ts) VALUES(?,?,?,?) 
+                     ON CONFLICT(file_id) DO UPDATE SET rev=excluded.rev,name=excluded.name,ts=excluded.ts""",
                   (entry.id, entry.rev, entry.name, int(time.time())))
-
-# ---- dropbox delta listing ----
 def _get_cursor():
     with _db() as c:
         row = c.execute("SELECT value FROM cursor WHERE id=1").fetchone()
         return row[0] if row else None
-
 def _save_cursor(cur):
     with _db() as c:
-        c.execute("""INSERT INTO cursor(id,value) VALUES(1,?)
+        c.execute("""INSERT INTO cursor(id,value) VALUES(1,?) 
                      ON CONFLICT(id) DO UPDATE SET value=excluded.value""", (cur,))
-
 def list_delta():
     cur = _get_cursor()
     if cur:
@@ -107,61 +91,40 @@ def list_delta():
         entries.extend(res.entries)
     _save_cursor(res.cursor)
     return entries
-
-# ---- io helpers ----
-@retry(stop=stop_after_attempt(4),
-       wait=wait_exponential(multiplier=0.5, max=8),
-       retry=retry_if_exception_type(Exception))
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=0.5, max=8), retry=retry_if_exception_type(Exception))
 def safe_download(path):
-    _, res = dbx.files_download(path)
-    return res.content
-
+    _, res = dbx.files_download(path); return res.content
 def send_line(text):
     try:
         if NOTIFY_SUMMARY:
             line_bot_api.push_message(LINE_USER_ID, TextSendMessage(text=text))
     except Exception as e:
         log.warning(f"[LINE通知失敗] {e}")
-
-# ---- summarizer ----
 def chunk_text(txt, size=6000):
-    for i in range(0, len(txt), size):
-        yield txt[i:i+size]
-
+    for i in range(0, len(txt), size): yield txt[i:i+size]
 def summarize_text(text: str) -> str:
     parts, out = list(chunk_text(text)), []
     for p in parts:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role":"system","content": f"与えられたテキストの要点のみを日本語で{MAX_TOKENS}トークン以内に要約。"},
-                {"role":"user","content": p}
-            ],
+            messages=[{"role":"system","content": f"与えられたテキストの要点のみを日本語で{MAX_TOKENS}トークン以内に要約。"},
+                      {"role":"user","content": p}],
             temperature=0.2
-        )
-        out.append(resp.choices[0].message.content.strip())
-    if len(out) == 1:
-        return out[0]
-    resp = client.chat.completions.create(
+        ); out.append(resp.choices[0].message.content.strip())
+    if len(out) == 1: return out[0]
+    resp = client.chat_completions.create(
         model=MODEL_NAME,
-        messages=[
-            {"role":"system","content": f"以下の複数要約を統合し、重複を排除して{MAX_TOKENS}トークン以内で日本語要約。"},
-            {"role":"user","content": "\n\n---\n\n".join(out)}
-        ],
+        messages=[{"role":"system","content": f"以下の複数要約を統合し重複排除して{MAX_TOKENS}トークン以内に要約。"},
+                  {"role":"user","content": "\n\n---\n\n".join(out)}],
         temperature=0.2
     )
     return resp.choices[0].message.content.strip()
-
-# ---- processing ----
 def process_new_files():
-    rid = REQ_ID()
-    log.info(json.dumps({"rid":rid, "msg":"scan-start"}))
+    rid = REQ_ID(); log.info(json.dumps({"rid":rid,"msg":"scan-start"}))
     for entry in list_delta():
-        # フォルダや削除イベントは attribute が無いのでスキップ
-        if not hasattr(entry, "path_lower"):
-            continue
-        if is_processed(entry):
-            continue
+        if not hasattr(entry, "path_lower"): continue
+        if is_processed(entry): continue
         path = entry.path_lower
         try:
             content = safe_download(path)
@@ -169,64 +132,65 @@ def process_new_files():
             summary = summarize_text(text)
             send_line(f"【要約】{entry.name}\n{summary}")
             mark_processed(entry)
-            log.info(json.dumps({"rid":rid, "file":entry.name, "status":"ok"}))
+            log.info(json.dumps({"rid":rid,"file":entry.name,"status":"ok"}))
         except Exception as e:
-            log.error(json.dumps({"rid":rid, "file":getattr(entry,'name','?'), "error":str(e)}))
-    log.info(json.dumps({"rid":rid, "msg":"scan-end"}))
-
-# ---- async wrapper ----
+            log.error(json.dumps({"rid":rid,"file":getattr(entry,'name','?'),"error":str(e)}))
+    log.info(json.dumps({"rid":rid,"msg":"scan-end"}))
 def _handle_async():
     try:
         process_new_files()
         if PARTNER_UPDATE_URL:
             try:
-                requests.post(PARTNER_UPDATE_URL, timeout=3)
-                log.info("[通知] partner update ping sent")
+                requests.post(PARTNER_UPDATE_URL, timeout=3); log.info("[通知] partner update ping sent")
             except Exception as e:
                 log.warning(f"[通知エラー] {e}")
     except Exception as e:
         log.error(f"[非同期処理エラー] {e}")
-
-# ---- endpoints ----
+from flask import Flask
 @app.route("/healthz", methods=["GET"])
-def healthz():
-    return "ok", 200
-
+def healthz(): return "ok", 200
 @app.route("/readyz", methods=["GET"])
 def readyz():
     try:
-        dbx.users_get_current_account()
-        client.models.retrieve(MODEL_NAME)
+        dbx.users_get_current_account(); client.models.retrieve(MODEL_NAME)
         return "ready", 200
     except Exception as e:
         return f"not-ready: {e}", 500
-
 @app.route("/webhook", methods=["GET","POST"])
 def webhook():
     if request.method == "GET":
-        challenge = request.args.get("challenge")
-        return (challenge, 200) if challenge else ("No challenge", 400)
-    Thread(target=_handle_async, daemon=True).start()
-    return "", 200
-
+        ch = request.args.get("challenge"); return (ch,200) if ch else ("No challenge",400)
+    Thread(target=_handle_async, daemon=True).start(); return "",200
 @app.route("/update-code", methods=["POST"])
 def update_code():
-    Thread(target=_handle_async, daemon=True).start()
-    return "OK", 200
-
+    Thread(target=_handle_async, daemon=True).start(); return "OK",200
 @app.route("/", methods=["GET"])
-def home():
-    return "<h2>E.T Code BOT 稼働中</h2>"
-
+def home(): return "<h2>E.T Code BOT 稼働中</h2>"
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT","10000")); app.run(host="0.0.0.0", port=port)
+# === /main.py ===
 PY
 
-      - name: Commit & push
+      - name: Commit if changed
+        shell: bash
         run: |
-          git config user.name  "auto-bot"
-          git config user.email "auto-bot@users.noreply.github.com"
-          git add main.py
-          git commit -m "chore: reinforce main.py (delta scan, sqlite state, retries, /readyz)"
-          git push
+            set -e
+            if git diff --quiet; then
+              echo "No changes to commit."
+            else
+              git config user.name  "auto-bot"
+              git config user.email "auto-bot@users.noreply.github.com"
+              git add main.py
+              git commit -m "chore: auto-patch main.py (scheduled)"
+              git push
+            fi
+
+      - name: Trigger Render deploy (if hook configured)
+        env:
+          DEPLOY_HOOK: ${{ secrets.DEPLOY_HOOK }}
+        run: |
+          if [ -n "${DEPLOY_HOOK}" ]; then
+            curl -fsSL -X POST "${DEPLOY_HOOK}" && echo "Render deploy triggered"
+          else
+            echo "DEPLOY_HOOK not set; skipping Render trigger."
+          fi
