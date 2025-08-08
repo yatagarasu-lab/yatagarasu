@@ -1,54 +1,34 @@
-name: Auto update and Deploy
+name: Deploy on main changes
 
 on:
   push:
     branches: [ main ]
     paths:
+      - "main.py"
+      - "requirements.txt"
       - "ops/**"
+      - "tools/**"
       - ".github/workflows/**"
   workflow_dispatch: {}
-  schedule:
-    - cron: "0 */3 * * *"  # 3時間ごと（お好みで）
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps for editor
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyyaml jinja2
-
-      - name: Apply desired changes
-        run: |
-          python ops/apply_changes.py
-
-      - name: Commit if changed
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          YATAGARASU_DEPLOY_HOOK: ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
+          E_T_CODE_DEPLOY_HOOK: ${{ secrets.E_T_CODE_DEPLOY_HOOK }}
         run: |
           set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
-            git commit -m "chore: auto-apply desired changes"
-            git push
-          else
-            echo "No changes to commit."
+          URL="${RENDER_DEPLOY_HOOK:-${YATAGARASU_DEPLOY_HOOK:-${E_T_CODE_DEPLOY_HOOK}}}"
+          if [ -z "$URL" ]; then
+            echo "No deploy hook secret set. Skip."
+            exit 0
           fi
-
-      - name: Trigger Render deploy (optional)
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-        run: |
-          curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}" \
-            && echo "Render deploy triggered."
+          curl -fsSL -X POST "$URL"
+          echo "Deploy triggered."
