@@ -1,35 +1,59 @@
 name: Auto Improve / Heartbeat
 
 on:
+  # 30分ごとに自己更新（頻度は後で自由に変えてOK）
   schedule:
-    - cron: "*/15 * * * *"   # 15分ごと（必要に応じて後で変更OK）
-  workflow_dispatch: {}      # 手動実行も可
+    - cron: "*/30 * * * *"
+  # 手動実行も可
+  workflow_dispatch: {}
 
 permissions:
-  contents: write            # スクリプトがコミット＆プッシュできるように
+  contents: write   # ここが重要。コミットに必要
+
+concurrency:
+  group: auto-improve-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  run:
+  improve:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run auto_patch
-        env:
-          BRANCH: ${{ vars.BRANCH }}
-          RUN_MODE: ${{ vars.RUN_MODE }}                # "auto" or "pr"
-          SERVICE_NAME: ${{ vars.SERVICE_NAME }}
-          # レンダーフック名はリポごとに合わせていずれかを埋めてください
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-          YATAGARASU_DEPLOY_HOOK: ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
-          E_T_CODE_DEPLOY_HOOK: ${{ secrets.E_T_CODE_DEPLOY_HOOK }}
+      - name: Git user
         run: |
-          python tools/auto_patch.py
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Ensure ops dir
+        run: |
+          mkdir -p ops
+          touch ops/last_run.log
+
+      - name: Append heartbeat + light auto-edit
+        run: |
+          TS="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "heartbeat: $TS  sha:${GITHUB_SHA::7}"
+          } >> ops/last_run.log
+
+          # 軽量な自動編集（READMEかopsにスタンプ）
+          if [ -f README.md ]; then
+            printf '\n<!-- auto-edit %s -->\n' "$TS" >> README.md
+          else
+            printf 'Auto note at %s\n' "$TS" >> ops/notes.md
+          fi
+
+      - name: Commit if changed
+        run: |
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore(auto): heartbeat & light auto-edit"
+            git push
+            echo "pushed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes."
+            echo "pushed=false" >> $GITHUB_OUTPUT
+          fi
+        id: commit_state
