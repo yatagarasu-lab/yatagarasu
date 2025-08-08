@@ -1,0 +1,3 @@
+edits:
+  - file: "README.md"
+    insert_end: "\n\nAuto-edited at {{ now }}"
