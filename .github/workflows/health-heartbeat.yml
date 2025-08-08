@@ -1,0 +1,40 @@
+name: Heartbeat & Auto-Recover
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # 15分毎
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        run: |
+          set -e
+          URL="${{ vars.HEALTH_URL }}"
+          if [ -z "$URL" ]; then
+            echo "HEALTH_URL repo variable is empty"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+          echo "Health status: $code"
+          if [ "$code" != "200" ]; then
+            echo "Health NG -> trigger Render deploy"
+            curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}" || true
+          fi
+
+      - name: Commit heartbeat
+        run: |
+          set -e
+          TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          mkdir -p ops
+          echo "last_heartbeat: $TS" > ops/last_run.log
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add ops/last_run.log
+          git commit -m "chore(ops): heartbeat $TS" || echo "no changes"
+          git push
