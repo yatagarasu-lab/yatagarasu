@@ -1,0 +1,35 @@
+name: Auto Improve / Heartbeat
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # 15分ごと（必要に応じて後で変更OK）
+  workflow_dispatch: {}      # 手動実行も可
+
+permissions:
+  contents: write            # スクリプトがコミット＆プッシュできるように
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run auto_patch
+        env:
+          BRANCH: ${{ vars.BRANCH }}
+          RUN_MODE: ${{ vars.RUN_MODE }}                # "auto" or "pr"
+          SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+          # レンダーフック名はリポごとに合わせていずれかを埋めてください
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          YATAGARASU_DEPLOY_HOOK: ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
+          E_T_CODE_DEPLOY_HOOK: ${{ secrets.E_T_CODE_DEPLOY_HOOK }}
+        run: |
+          python tools/auto_patch.py
