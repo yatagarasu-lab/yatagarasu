@@ -1,6 +1,7 @@
-name: Deploy on main changes
+name: Auto edit -> Commit -> Deploy
 
 on:
+  # main に関わる変更 or ワークフロー自体の変更で走る
   push:
     branches: [ main ]
     paths:
@@ -9,26 +10,67 @@ on:
       - "ops/**"
       - "tools/**"
       - ".github/workflows/**"
+  # 1時間ごとに Render のデプロイを起動（必要なら頻度を変えてOK）
+  schedule:
+    - cron: "0 * * * *"
+  # 手動実行
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Render deploy
+      - name: Pick Deploy Hook (Render)
+        id: pick
+        run: |
+          # 使えるものから順に採用（どれか1つでOK）
+          url="${{ secrets.RENDER_DEPLOY_HOOK }}"
+          [ -z "$url" ] && url="${{ secrets.YATAGARASU_DEPLOY_HOOK }}"
+          [ -z "$url" ] && url="${{ secrets.E_T_CODE_DEPLOY_HOOK }}"
+          if [ -z "$url" ]; then
+            echo "ERROR: No deploy hook secret set (RENDER_DEPLOY_HOOK / YATAGARASU_DEPLOY_HOOK / E_T_CODE_DEPLOY_HOOK)."
+            exit 1
+          fi
+          echo "url=$url" >> $GITHUB_OUTPUT
+
+      - name: Trigger Render Deploy
         env:
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-          YATAGARASU_DEPLOY_HOOK: ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
-          E_T_CODE_DEPLOY_HOOK: ${{ secrets.E_T_CODE_DEPLOY_HOOK }}
+          URL: ${{ steps.pick.outputs.url }}
         run: |
           set -e
-          URL="${RENDER_DEPLOY_HOOK:-${YATAGARASU_DEPLOY_HOOK:-${E_T_CODE_DEPLOY_HOOK}}}"
-          if [ -z "$URL" ]; then
-            echo "No deploy hook secret set. Skip."
-            exit 0
+          echo "POST $URL"
+          # Render の Deploy Hook は POST でOK
+          http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "$URL")
+          echo "HTTP $http_code"
+          if [ "$http_code" != "200" ] && [ "$http_code" != "202" ]; then
+            echo "Deploy hook returned $http_code"
+            exit 1
           fi
-          curl -fsSL -X POST "$URL"
           echo "Deploy triggered."
+
+      # （任意）少し待ってヘルスチェックする。SERVICE_URL があれば有効化。
+      - name: Optional health check
+        if: ${{ vars.SERVICE_URL != '' }}
+        env:
+          SERVICE_URL: ${{ vars.SERVICE_URL }}
+        run: |
+          echo "Health check to: $SERVICE_URL/healthz"
+          for i in $(seq 1 12); do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" "$SERVICE_URL/healthz" || true)
+            echo "Attempt $i -> $code"
+            if [ "$code" = "200" ]; then
+              echo "Service healthy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check did not pass in time (2min)."
+          # ここで失敗させず警告だけにする
+          exit 0
