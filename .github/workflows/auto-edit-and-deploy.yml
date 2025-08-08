@@ -1,0 +1,57 @@
+name: Auto edit -> Commit -> Deploy
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 30分おき（必要に応じて変更）
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [external_trigger]
+
+permissions:
+  contents: write
+
+env:
+  # Render デプロイフック（repo secrets に入れてあるやつ）
+  RENDER_DEPLOY_HOOK: ${{ secrets.YATAGARASU_DEPLOY_HOOK }}
+  # 使うなら：Dropbox のリフレッシュトークンなど（repo secrets に入れてあれば使える）
+  DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+  DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+  DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+
+jobs:
+  auto-edit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install dropbox pyyaml
+
+      - name: Run auto editor
+        run: |
+          python scripts/auto_edit.py
+
+      - name: Commit changes (if any)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "chore: auto-edit $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push
+          fi
+
+      - name: Trigger Render Deploy (optional)
+        if: env.RENDER_DEPLOY_HOOK != ''
+        run: |
+          curl -fsSL -X POST "$RENDER_DEPLOY_HOOK" || echo "Render hook skipped/failed"
