@@ -1,0 +1,5 @@
+settings:
+  auto_summarize: true
+  auto_push: true
+  target_branch: main
+  notify_line: true
