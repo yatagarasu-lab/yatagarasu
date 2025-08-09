@@ -1,36 +1,19 @@
-name: Dropbox Sync
+name: dropbox-sync
 
 on:
+  schedule:
+    - cron: "0 * * * *"   # 毎時0分に実行（必要に応じて変更）
   workflow_dispatch:
-    inputs:
-      action:
-        description: "list（一覧） or write（書き込み）"
-        required: true
-        default: "write"
-        type: choice
-        options: [list, write]
-      dropbox_path:
-        description: "操作対象のDropboxパス（例 /GPT育成ログ/health）※ルートは空文字"
-        required: false
-        default: "/GPT育成ログ/health"
-      content:
-        description: "write のときアップロードする本文（空ならハートビートを自動生成）"
-        required: false
-        default: ""
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
-      # --- Dropbox Secrets（両リポジトリで同じ名前で用意してください） ---
-      DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
-      DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
       DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
-      # --- Inputs（未指定時はPython側でデフォルトに寄せます） ---
-      ACTION:       ${{ github.event.inputs.action }}
-      DROPBOX_PATH: ${{ github.event.inputs.dropbox_path }}
-      WRITE_CONTENT:${{ github.event.inputs.content }}
+      DROPBOX_FOLDER_PATH: "/Apps/slot-data-analyzer"
     steps:
       - uses: actions/checkout@v4
 
@@ -38,78 +21,27 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install "dropbox==11.36.2"
+          pip install dropbox==11.36.2
 
-      - name: Run Dropbox sync
+      - name: Sync Dropbox folder
         run: |
-          python - <<'PY'
-          import os, time, sys, traceback
-          import dropbox
-          from dropbox import exceptions, files
+          python <<'PY'
+          import os, dropbox
 
-          def env(k, default=None):
-              v = os.getenv(k)
-              return v if (v and v.strip() != "") else default
-
-          # Inputs
-          action = (env("ACTION","write") or "write").lower()
-          path   = env("DROPBOX_PATH","/GPT育成ログ/health") or ""
-          body   = env("WRITE_CONTENT","")
-
-          # Secrets
-          app_key    = env("DROPBOX_APP_KEY")
-          app_secret = env("DROPBOX_APP_SECRET")
-          refresh    = env("DROPBOX_REFRESH_TOKEN")
-          missing = [k for k,v in {
-              "DROPBOX_APP_KEY":app_key,
-              "DROPBOX_APP_SECRET":app_secret,
-              "DROPBOX_REFRESH_TOKEN":refresh
-          }.items() if not v]
-          if missing:
-              print("ERROR: Missing secrets:", ", ".join(missing))
-              sys.exit(1)
-
-          # Connect
+          folder_path = os.getenv("DROPBOX_FOLDER_PATH")
           dbx = dropbox.Dropbox(
-              oauth2_refresh_token=refresh,
-              app_key=app_key,
-              app_secret=app_secret,
+              oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
+              app_key=os.getenv("DROPBOX_APP_KEY"),
+              app_secret=os.getenv("DROPBOX_APP_SECRET")
           )
 
-          try:
-              if action == "list":
-                  # ルートは ""（"/" ではない）
-                  list_path = "" if path in (None, "", "/") else path
-                  res = dbx.files_list_folder(list_path)
-                  names = [e.name for e in res.entries]
-                  print(f"OK LIST: {list_path or '(root)'} -> {len(names)} items")
-                  for n in names[:50]:
-                      print(" -", n)
-              else:
-                  # フォルダを確実に作る（存在してもOK）
-                  folder = path.rstrip("/") if path else ""
-                  if folder not in ("", "/"):
-                      try:
-                          dbx.files_get_metadata(folder)
-                      except exceptions.ApiError:
-                          dbx.files_create_folder_v2(folder)
-                  # 本文（未指定ならハートビート）
-                  if not body:
-                      ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-                      body = f"heartbeat UTC {ts}\n"
-                  fname = f"sync_{int(time.time())}.txt"
-                  dst = f"{folder}/{fname}" if folder else f"/{fname}"
-                  dbx.files_upload(
-                      body.encode("utf-8"),
-                      dst,
-                      mode=files.WriteMode("overwrite")
-                  )
-                  print(f"OK WRITE: uploaded -> {dst}")
-          except Exception as e:
-              traceback.print_exc()
-              print("ERROR:", e)
-              sys.exit(1)
+          print(f"📂 Dropboxフォルダ: {folder_path}")
+          res = dbx.files_list_folder(folder_path)
+          if not res.entries:
+              print("⚠ フォルダは空です")
+          else:
+              for e in res.entries:
+                  print(f"- {e.name}")
           PY
