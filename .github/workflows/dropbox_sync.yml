@@ -2,205 +2,114 @@ name: Dropbox Sync
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"   # 30分おき（必要に応じて調整）
-
-permissions:
-  contents: write
+    inputs:
+      action:
+        description: "list（一覧） or write（書き込み）"
+        required: true
+        default: "write"
+        type: choice
+        options: [list, write]
+      dropbox_path:
+        description: "操作対象のDropboxパス（例 /GPT育成ログ/health）※ルートは空文字"
+        required: false
+        default: "/GPT育成ログ/health"
+      content:
+        description: "write のときアップロードする本文（空ならハートビートを自動生成）"
+        required: false
+        default: ""
 
 jobs:
-  dropbox-sync:
+  sync:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     env:
-      # 必須（Secrets）
-      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      # --- Dropbox Secrets（両リポジトリで同じ名前で用意してください） ---
       DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
       DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
-      GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
-
-      # 任意（Variables）
-      TARGET_REPO:           ${{ vars.TARGET_REPO }}         # 例: yatagarasu-lab/yatagarasu
-      TARGET_BRANCH:         ${{ vars.TARGET_BRANCH || 'main' }}
-      DROPBOX_FOLDER:        ${{ vars.DROPBOX_FOLDER }}      # 例: /inbox  未設定ならルート
-      RUN_MODE:              ${{ vars.RUN_MODE || 'safe' }}  # future use
-
-      # 作業ディレクトリ
-      SYNC_DIR:              data/dropbox
-      STATE_FILE:            ops/dropbox_state.json
-
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      # --- Inputs（未指定時はPython側でデフォルトに寄せます） ---
+      ACTION:       ${{ github.event.inputs.action }}
+      DROPBOX_PATH: ${{ github.event.inputs.dropbox_path }}
+      WRITE_CONTENT:${{ github.event.inputs.content }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Validate required secrets/vars
-        run: |
-          set -e
-          miss=0
-          for k in DROPBOX_REFRESH_TOKEN DROPBOX_APP_KEY DROPBOX_APP_SECRET GITHUB_TOKEN; do
-            if [ -z "${!k}" ]; then
-              echo "::error title=Missing secret::$k is empty"
-              miss=1
-            fi
-          done
-          if [ -z "${TARGET_BRANCH}" ]; then
-            echo "::error title=Missing var::TARGET_BRANCH is empty"
-            miss=1
-          fi
-          [ "$miss" = "0" ] || exit 1
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install dropbox chardet
+          pip install --upgrade pip
+          pip install "dropbox==11.36.2"
 
-      - name: Sync from Dropbox -> ${{ env.SYNC_DIR }}
-        id: sync
-        shell: bash
+      - name: Run Dropbox sync
         run: |
-          set -euo pipefail
-          mkdir -p "${SYNC_DIR}" "$(dirname "${STATE_FILE}")"
-
-          python - <<'PY' > sync.log
-          import os, json, hashlib, sys, pathlib, time
+          python - <<'PY'
+          import os, time, sys, traceback
           import dropbox
+          from dropbox import exceptions, files
 
-          REFRESH = os.environ["DROPBOX_REFRESH_TOKEN"]
-          APP_KEY = os.environ["DROPBOX_APP_KEY"]
-          APP_SECRET = os.environ["DROPBOX_APP_SECRET"]
-          FOLDER = os.environ.get("DROPBOX_FOLDER") or ""
-          SYNC_DIR = os.environ["SYNC_DIR"]
-          STATE_FILE = os.environ["STATE_FILE"]
+          def env(k, default=None):
+              v = os.getenv(k)
+              return v if (v and v.strip() != "") else default
 
-          def safe_path(name: str) -> str:
-            p = name.lstrip("/").replace("..","_")
-            return str(pathlib.Path(SYNC_DIR) / p)
+          # Inputs
+          action = (env("ACTION","write") or "write").lower()
+          path   = env("DROPBOX_PATH","/GPT育成ログ/health") or ""
+          body   = env("WRITE_CONTENT","")
 
-          # load state
-          state = {}
-          if os.path.exists(STATE_FILE):
-            try:
-              with open(STATE_FILE, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            except Exception:
-              state = {}
+          # Secrets
+          app_key    = env("DROPBOX_APP_KEY")
+          app_secret = env("DROPBOX_APP_SECRET")
+          refresh    = env("DROPBOX_REFRESH_TOKEN")
+          missing = [k for k,v in {
+              "DROPBOX_APP_KEY":app_key,
+              "DROPBOX_APP_SECRET":app_secret,
+              "DROPBOX_REFRESH_TOKEN":refresh
+          }.items() if not v]
+          if missing:
+              print("ERROR: Missing secrets:", ", ".join(missing))
+              sys.exit(1)
 
+          # Connect
           dbx = dropbox.Dropbox(
-              oauth2_refresh_token=REFRESH,
-              app_key=APP_KEY,
-              app_secret=APP_SECRET
+              oauth2_refresh_token=refresh,
+              app_key=app_key,
+              app_secret=app_secret,
           )
 
-          changed = False
-          touched = set()
-
-          def handle_entries(entries):
-            nonlocal changed
-            for e in entries:
-              if isinstance(e, dropbox.files.FileMetadata):
-                path = e.path_lower
-                dest = safe_path(path)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                rev = e.rev
-                old = state.get(path, {})
-                if old.get("rev") == rev:
-                  touched.add(path)
-                  continue
-                # download
-                try:
-                  md, res = dbx.files_download(path)
-                  content = res.content
-                except Exception as ex:
-                  print(f"[WARN] download failed: {path}: {ex}")
-                  continue
-                with open(dest, "wb") as f:
-                  f.write(content)
-                state[path] = {"rev": rev, "size": e.size, "ts": int(time.time())}
-                touched.add(path)
-                changed = True
-                print(f"[UPDATE] {path} -> {dest}")
-              elif isinstance(e, dropbox.files.FolderMetadata):
-                d = safe_path(e.path_lower)
-                os.makedirs(d, exist_ok=True)
-              else:
-                # deleted or unknown types will be cleaned later
-                pass
-
-          # list & download (paged)
           try:
-            res = dbx.files_list_folder(FOLDER)
-            handle_entries(res.entries)
-            while res.has_more:
-              res = dbx.files_list_folder_continue(res.cursor)
-              handle_entries(res.entries)
-          except Exception as ex:
-            print(f"::error title=Dropbox list failed::{ex}")
-            sys.exit(1)
-
-          # clean removed files (present in state but not touched anymore)
-          removed = []
-          for path in list(state.keys()):
-            if path not in touched:
-              local = safe_path(path)
-              if os.path.exists(local):
-                try:
-                  os.remove(local)
-                  removed.append(local)
-                except Exception: pass
-              state.pop(path, None)
-              changed = True
-              print(f"[DELETE] {local}")
-
-          # persist state
-          with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
-
-          print(f"CHANGED={changed}")
+              if action == "list":
+                  # ルートは ""（"/" ではない）
+                  list_path = "" if path in (None, "", "/") else path
+                  res = dbx.files_list_folder(list_path)
+                  names = [e.name for e in res.entries]
+                  print(f"OK LIST: {list_path or '(root)'} -> {len(names)} items")
+                  for n in names[:50]:
+                      print(" -", n)
+              else:
+                  # フォルダを確実に作る（存在してもOK）
+                  folder = path.rstrip("/") if path else ""
+                  if folder not in ("", "/"):
+                      try:
+                          dbx.files_get_metadata(folder)
+                      except exceptions.ApiError:
+                          dbx.files_create_folder_v2(folder)
+                  # 本文（未指定ならハートビート）
+                  if not body:
+                      ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                      body = f"heartbeat UTC {ts}\n"
+                  fname = f"sync_{int(time.time())}.txt"
+                  dst = f"{folder}/{fname}" if folder else f"/{fname}"
+                  dbx.files_upload(
+                      body.encode("utf-8"),
+                      dst,
+                      mode=files.WriteMode("overwrite")
+                  )
+                  print(f"OK WRITE: uploaded -> {dst}")
+          except Exception as e:
+              traceback.print_exc()
+              print("ERROR:", e)
+              sys.exit(1)
           PY
-
-          cat sync.log
-          if grep -q "CHANGED=True" sync.log; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Prepare git (actor)
-        run: |
-          git config user.name  "auto-sync-bot"
-          git config user.email "auto-sync-bot@users.noreply.github.com"
-
-      - name: Commit changes (if any)
-        if: steps.sync.outputs.changed == 'true'
-        run: |
-          set -e
-          git add -A
-          git commit -m "chore(sync): mirror from Dropbox to ${SYNC_DIR} [skip ci]" || echo "nothing to commit"
-
-      - name: Push to same repo
-        if: steps.sync.outputs.changed == 'true' && (env.TARGET_REPO == '' || env.TARGET_REPO == github.repository)
-        run: |
-          set -e
-          git push origin "${TARGET_BRANCH}"
-
-      - name: Push to TARGET_REPO
-        if: steps.sync.outputs.changed == 'true' && env.TARGET_REPO != '' && env.TARGET_REPO != github.repository
-        env:
-          REPO_URL: https://x-access-token:${{ env.GITHUB_TOKEN }}@github.com/${{ env.TARGET_REPO }}.git
-        run: |
-          set -e
-          git fetch origin "${TARGET_BRANCH}"
-          git branch -M "${TARGET_BRANCH}"
-          git remote add mirror "${REPO_URL}" || git remote set-url mirror "${REPO_URL}"
-          git push mirror "${TARGET_BRANCH}"
-
-      - name: No change
-        if: steps.sync.outputs.changed != 'true'
-        run: echo "No Dropbox changes. Nothing to commit."
