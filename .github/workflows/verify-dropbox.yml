@@ -1,4 +1,5 @@
 name: verify-dropbox
+
 on:
   workflow_dispatch:
 
@@ -7,24 +8,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      DROPBOX_APP_KEY:        ${{ secrets.DROPBOX_APP_KEY }}
-      DROPBOX_APP_SECRET:     ${{ secrets.DROPBOX_APP_SECRET }}
-      DROPBOX_REFRESH_TOKEN:  ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+      DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+      DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+      DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install dropbox==11.36.2
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install "dropbox==11.36.2"
       - name: List Dropbox root
         run: |
           python - <<'PY'
-          import os, dropbox
-          dbx = dropbox.Dropbox(
-              oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
-              app_key=os.getenv("DROPBOX_APP_KEY"),
-              app_secret=os.getenv("DROPBOX_APP_SECRET")
-          )
-          # ルートは空文字！（"/" じゃない）
-          res = dbx.files_list_folder("")
-          print("OK:", [e.name for e in res.entries][:10])
+          import os, sys, traceback, dropbox
+          def fail(msg):
+              print("ERROR:", msg); sys.exit(1)
+
+          app_key = os.getenv("DROPBOX_APP_KEY")
+          app_secret = os.getenv("DROPBOX_APP_SECRET")
+          refresh = os.getenv("DROPBOX_REFRESH_TOKEN")
+          miss = [k for k,v in [("DROPBOX_APP_KEY",app_key),("DROPBOX_APP_SECRET",app_secret),("DROPBOX_REFRESH_TOKEN",refresh)] if not v]
+          if miss: fail("Missing secrets: " + ", ".join(miss))
+
+          try:
+              dbx = dropbox.Dropbox(oauth2_refresh_token=refresh, app_key=app_key, app_secret=app_secret)
+              res = dbx.files_list_folder("")  # ルートは ""（"/" ではない）
+              names = [e.name for e in res.entries]
+              print("OK: listed", len(names), "items")
+              print("Sample:", names[:20])
+          except Exception as e:
+              traceback.print_exc(); fail(str(e))
           PY
